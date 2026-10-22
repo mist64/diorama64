@@ -33,6 +33,7 @@ public:
     uint32_t swapchain_width() const; uint32_t swapchain_height() const;
     void end_submission();                  // after the GPU work is submitted: release the swapchain image, xrEndFrame; a no-op when this frame had no xrBeginFrame (session not running)
     bool exiting() const;
+    const ar_frame_info &last_frame() const;   // what the last wait_frame (called by the runtime's begin_frame) returned
 
     struct Impl;
 private:

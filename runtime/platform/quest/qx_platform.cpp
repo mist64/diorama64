@@ -93,11 +93,13 @@ struct QxPlatform::Impl {
     ar_submit_info submit;
     bool submit_valid = false;
     ar_pose last_head;
+    ar_frame_info last_info;      // what the last wait_frame returned
 
     Impl(android_app *a, const QxPlatform::Config &c) : app(a), cfg(c) {
         memset(&api, 0, sizeof api);
         memset(&submit, 0, sizeof submit);
         memset(&last_head, 0, sizeof last_head);
+        memset(&last_info, 0, sizeof last_info);
         last_head.quat[3] = 1.f;
         for (auto &v : views) v = XrView{XR_TYPE_VIEW};
     }
@@ -471,8 +473,8 @@ void QxPlatform::Impl::set_passthrough(bool on) {
 }
 
 void QxPlatform::Impl::end_frame() {
-    if (!begun) {
-        waited = acquired = submit_valid = false;
+    if (!begun) {   // waited stays set: the next wait_frame begins (and ends) that frame before waiting again
+        acquired = submit_valid = false;
         return;
     }
     bool released = false;
@@ -486,13 +488,13 @@ void QxPlatform::Impl::end_frame() {
     const XrCompositionLayerBaseHeader *layers[2];
     uint32_t layer_count = 0;
     const bool oriented = (view_flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+    if (frame_state.shouldRender && passthrough_on) {   // even when the projection cannot be sent: passthrough, not black
+        pt_layer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+        pt_layer.space = XR_NULL_HANDLE;
+        pt_layer.layerHandle = passthrough_layer;
+        layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader *>(&pt_layer);
+    }
     if (frame_state.shouldRender && released && submit_valid && oriented) {
-        if (passthrough_on) {
-            pt_layer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-            pt_layer.space = XR_NULL_HANDLE;
-            pt_layer.layerHandle = passthrough_layer;
-            layers[layer_count++] = reinterpret_cast<const XrCompositionLayerBaseHeader *>(&pt_layer);
-        }
         for (uint32_t eye = 0; eye < kEyes; eye++) {
             pviews[eye] = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
             pviews[eye].pose = views[eye].pose;
@@ -549,8 +551,16 @@ namespace {
 
 using Impl = QxPlatform::Impl;
 
-int cb_wait_frame(void *user, ar_frame_info *out) {
-    Impl *m = static_cast<Impl *>(user);
+int wait_frame(Impl *m, ar_frame_info *out) {
+    if (m->waited && !m->begun && m->session != XR_NULL_HANDLE) {
+        // The last xrBeginFrame failed: a waited frame that is never begun can make the next xrWaitFrame block forever.
+        XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
+        if (m->ok(xrBeginFrame(m->session, &bi), "xrBeginFrame (retry)")) {
+            m->begun = true;
+            m->acquired = m->submit_valid = false;
+            m->end_frame();   // no projection layer (passthrough only)
+        }
+    }
     if (m->begun) m->end_frame();   // the caller skipped end_submission: keep the XR frame loop in sync
     m->poll_events();
     m->waited = m->begun = m->acquired = m->submit_valid = false;
@@ -590,6 +600,13 @@ int cb_wait_frame(void *user, ar_frame_info *out) {
     if (out->head_tracked) m->last_head = out->tracking_from_head;
     out->should_render = m->frame_state.shouldRender ? 1 : 0;
     return 1;
+}
+
+int cb_wait_frame(void *user, ar_frame_info *out) {
+    Impl *m = static_cast<Impl *>(user);
+    const int r = wait_frame(m, out);
+    m->last_info = *out;
+    return r;
 }
 
 void cb_begin_frame(void *user) {
@@ -699,6 +716,7 @@ bool QxPlatform::color_wants_linear() const { return m_->linearize; }
 uint32_t QxPlatform::swapchain_width() const { return m_->width; }
 uint32_t QxPlatform::swapchain_height() const { return m_->height; }
 void QxPlatform::end_submission() { m_->end_frame(); }
+const ar_frame_info &QxPlatform::last_frame() const { return m_->last_info; }
 bool QxPlatform::exiting() const { return m_->exit_requested || m_->app->destroyRequested; }
 
 }  // namespace ar

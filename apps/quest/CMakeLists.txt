@@ -1,5 +1,5 @@
 set(GLUE_DIR ${ANDROID_NDK}/sources/android/native_app_glue)
 add_library(diorama64 SHARED main.cpp ${GLUE_DIR}/android_native_app_glue.c)
 target_include_directories(diorama64 PRIVATE ${GLUE_DIR})
-target_link_libraries(diorama64 PRIVATE android log ar_core ar_cube_adapter ar_vos_logic ar_quest)
+target_link_libraries(diorama64 PRIVATE ar_quest ar_cube_adapter)
 target_link_options(diorama64 PRIVATE -u ANativeActivity_onCreate)
