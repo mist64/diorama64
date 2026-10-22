@@ -106,8 +106,7 @@ void main() {
     gl_ClipDistance[2] = box ? v.wclip_hi.x - pos.x : off;
     gl_ClipDistance[3] = box ? pos.z - v.wclip_lo.z : off;
     gl_ClipDistance[4] = box ? v.wclip_hi.z - pos.z : off;
-@LAYER@    const int nw = nrm[vid];
-    o_nrm = (d.lflags & 256u) != 0u ? vec3(bitfieldExtract(nw, 0, 8), bitfieldExtract(nw, 8, 8), bitfieldExtract(nw, 16, 8)) / 127.0 : vec3(0.0);
+@LAYER@    o_nrm = (d.lflags & 256u) != 0u ? vec3(bitfieldExtract(nrm[vid], 0, 8), bitfieldExtract(nrm[vid], 8, 8), bitfieldExtract(nrm[vid], 16, 8)) / 127.0 : vec3(0.0);
     o_veye = v.eye_pull.xyz - pos;
     const float nl = length(o_nrm);
     o_lit = L.tint_amb.a + (1.0 - L.tint_amb.a) * (nl > 0.5 ? max(dot(o_nrm / nl, L.dir_on.xyz), 0.0) : 0.0);

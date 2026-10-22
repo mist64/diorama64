@@ -27,9 +27,10 @@ bool compile_glsl(const std::string &source, GlslStage stage, std::vector<uint32
     std::vector<uint32_t> out;
     glslang::SpvOptions opt;
     opt.disableOptimizer = true;
-    glslang::GlslangToSpv(*program.getIntermediate(lang), out, &opt);
+    spv::SpvBuildLogger logger;
+    glslang::GlslangToSpv(*program.getIntermediate(lang), out, &logger, &opt);
     if (out.empty()) {
-        if (error) *error = "GlslangToSpv produced no SPIR-V";
+        if (error) *error = "GlslangToSpv produced no SPIR-V\n" + logger.getAllMessages();
         return false;
     }
     if (spirv) *spirv = std::move(out);
