@@ -193,11 +193,12 @@ public:
           cache_path_(init.pipeline_cache_path) {
         glsl_compiler_init();
         ok_ = init_device();
-        if (!ok_) vos_log("AR_VULKAN init failed: the device draws nothing");
+        if (!ok_) vos_log("AR_VULKAN init failed: no render device");
         else vos_log("AR_VULKAN device %s ready (ring alignment %llu, timestamps %d)", props_.deviceName,
                      (unsigned long long)ring_align_, timestamps_ ? 1 : 0);
         done_thread_ = std::thread([this] { completion_loop(); });
     }
+    bool ok() const { return ok_; }
     ~VulkanDevice() override {
         wait_idle();
         {
@@ -206,9 +207,11 @@ public:
         }
         cv_.notify_all();
         if (done_thread_.joinable()) done_thread_.join();
-        vkDeviceWaitIdle(dev_);
-        save_pipeline_cache();
-        destroy_all();
+        if (dev_) {   // null only when init failed before touching the device (create_vulkan_device returns null)
+            vkDeviceWaitIdle(dev_);
+            save_pipeline_cache();
+            destroy_all();
+        }
         glsl_compiler_finish();
     }
 
@@ -1435,6 +1438,8 @@ private:
 }
 
 std::unique_ptr<IRenderDevice> create_vulkan_device(const VulkanDeviceInit &init) {
-    return std::unique_ptr<IRenderDevice>(new VulkanDevice(init));
+    std::unique_ptr<VulkanDevice> d(new VulkanDevice(init));
+    if (!d->ok()) return nullptr;   // the constructor logged "AR_VULKAN init failed: ..."
+    return d;
 }
 }

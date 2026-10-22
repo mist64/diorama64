@@ -71,6 +71,7 @@ extern "C" void android_main(android_app *app) {
             }
         }
         if (!more) {   // the session is exiting: finish the activity, then wait for APP_CMD_DESTROY
+            ar::vos_log("AR_QUEST_STOP ticks=%llu", (unsigned long long)session.ticks_done());
             session.stop();
             game = false;
             running = false;
@@ -84,7 +85,8 @@ extern "C" void android_main(android_app *app) {
                         fi.tracking_from_head.pos[2]);
         }
     }
+    const unsigned long long ticks = session.ticks_done();
     session.stop();   // before the platform (its Vulkan device and XR session) is destroyed
     app->userData = nullptr;
-    ar::vos_log("AR_QUEST_EXIT ticks=%llu", (unsigned long long)session.ticks_done());
+    ar::vos_log("AR_QUEST_EXIT ticks=%llu", ticks);
 }

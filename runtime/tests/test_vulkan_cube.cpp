@@ -15,6 +15,7 @@ int main() {
     VulkanDeviceInit init{}; std::string err;
     if (!vk_host_create(&init, &err)) SKIP(err.c_str());
     auto dev = create_vulkan_device(init);
+    CHECK(dev);
     Renderer renderer(*dev);
     fake_platform fp; fake_platform_init(&fp, 90.0); fp.width = 256; fp.height = 256; fp.view_count = 2; fp.stop_after = 4;
     ar_runtime *rt = ar_runtime_create(cube_adapter(), &fp.api);

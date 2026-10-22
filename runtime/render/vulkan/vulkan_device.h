@@ -17,5 +17,6 @@ struct VulkanDeviceInit { VkInstance instance; VkPhysicalDevice physical; VkDevi
 // image is in COLOR_ATTACHMENT_OPTIMAL (a depth image: DEPTH_STENCIL_ATTACHMENT_OPTIMAL) when encode_resolve records and
 // is left in it.
 struct VulkanExternalImage { VkImage image; VkImageView view; VkFormat format; uint32_t width, height, layers; };
+// nullptr when the device's own initialisation fails (logged as "AR_VULKAN init failed: ...").
 std::unique_ptr<IRenderDevice> create_vulkan_device(const VulkanDeviceInit &init);
 }

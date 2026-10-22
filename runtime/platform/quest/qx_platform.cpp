@@ -453,6 +453,7 @@ void QxPlatform::Impl::poll_events() {
             } else if (state == XR_SESSION_STATE_STOPPING && session_running) {
                 ok(xrEndSession(session), "xrEndSession");
                 session_running = false;
+                waited = begun = acquired = submit_valid = false;   // an ended session has no frame outstanding
             } else if (state == XR_SESSION_STATE_EXITING || state == XR_SESSION_STATE_LOSS_PENDING) {
                 exit_requested = true;
             }
@@ -559,6 +560,17 @@ int wait_frame(Impl *m, ar_frame_info *out) {
             m->begun = true;
             m->acquired = m->submit_valid = false;
             m->end_frame();   // no projection layer (passthrough only)
+        } else {
+            // Still not begun: never issue another xrWaitFrame over it. Keep waited and report a frame with nothing to
+            // render until the begin succeeds or the session stops running (poll_events then clears waited).
+            m->poll_events();
+            if (m->exit_requested) return 0;
+            if (m->session_running && m->waited) {
+                sleep_ms(10);
+                memset(out, 0, sizeof *out);
+                out->tracking_from_head = m->last_head;
+                return 1;
+            }
         }
     }
     if (m->begun) m->end_frame();   // the caller skipped end_submission: keep the XR frame loop in sync

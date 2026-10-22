@@ -29,12 +29,15 @@ QxSession::QxSession(const ar_adapter *a, QxPlatform &p, const std::string &file
 QxSession::~QxSession() { stop(); }
 
 bool QxSession::start(const std::string &rom_path, const std::string &save_dir, std::string *err) {
+    if (rt_) {   // already running: leave it alone
+        *err = "session already started";
+        return false;
+    }
     auto fail = [&](const std::string &why) {
         *err = why;
         stop();
         return false;
     };
-    if (rt_) return fail("session already started");
     const QxVulkan &vk = platform_.vulkan();
     if (vk.device == VK_NULL_HANDLE) return fail("no Vulkan device (the platform did not start)");
     VulkanDeviceInit init{vk.instance, vk.physical, vk.device, vk.queue_family, vk.queue, vk.get_instance_proc_addr,
@@ -63,9 +66,12 @@ bool QxSession::frame() {
     ar_render_frame rf{};
     if (!ar_runtime_begin_frame(rt_, &rf)) return false;
     if (!rf.snapshot || rf.view_count == 0 || !platform_.frame_renderable()) {
-        // Nothing to draw (no snapshot yet, or the compositor does not want this frame): hand the views back, end the
-        // XR frame (passthrough only) and release the runtime frame here, since no GPU completion will.
-        ar_runtime_submit_frame(rt_, &rf);
+        // Nothing to draw (no snapshot yet, or the compositor does not want this frame): submit no views, so the XR
+        // frame carries passthrough only (an acquired image is still released), and release the runtime frame here,
+        // since no GPU completion will (as vos_submit_if_empty).
+        ar_render_frame none = rf;
+        none.view_count = 0;
+        ar_runtime_submit_frame(rt_, &none);
         platform_.end_submission();
         ar_runtime_end_frame(rt_, &rf);
         return true;
