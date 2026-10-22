@@ -4,6 +4,9 @@
 #include <cstdio>
 #include <mutex>
 #include <unistd.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 namespace ar {
 namespace {
 std::mutex g_m;
@@ -24,6 +27,9 @@ void vos_log(const char *fmt, ...) {
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_t0).count();
     std::lock_guard<std::mutex> g(g_m);
     std::fprintf(stderr, "[%8.3f] %s\n", t, msg);
+#if defined(__ANDROID__)
+    __android_log_write(ANDROID_LOG_INFO, "Diorama64", msg);
+#endif
     if (g_file) { std::fprintf(g_file, "[%8.3f] %s\n", t, msg); std::fflush(g_file); }
 }
 void vos_exit_now(int code) {
