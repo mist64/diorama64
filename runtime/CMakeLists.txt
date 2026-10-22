@@ -5,6 +5,10 @@ target_include_directories(ar_capture PUBLIC include)
 add_library(ar_core STATIC core/ar_math.c core/ar_view.c core/ar_float_panel.c core/sarec.c core/snapshot_ring.cpp core/texture_fifo.cpp core/mem_stats.cpp core/runtime.cpp core/audio_ring.cpp core/scene_ring.cpp core/wav_io.cpp core/scene_track.cpp core/audio_settings.cpp core/audio_tuning.c)
 target_include_directories(ar_core PUBLIC include)
 target_link_libraries(ar_core PUBLIC ar_capture)
+if(NOT APPLE)
+  find_package(Threads REQUIRED)
+  target_link_libraries(ar_core PUBLIC Threads::Threads)
+endif()
 
 add_library(ar_render_common STATIC render/common/combiner.cpp render/common/draw_list.cpp render/common/renderer.cpp
             render/common/ar_layer.cpp render/common/debug_points.cpp render/common/scene_shapes.cpp render/common/depth_stats.cpp
@@ -13,6 +17,7 @@ add_library(ar_render_common STATIC render/common/combiner.cpp render/common/dra
 target_include_directories(ar_render_common PUBLIC render/common)
 target_link_libraries(ar_render_common PUBLIC ar_core)
 
+if(APPLE)
 add_library(ar_render_metal STATIC render/metal/msl_emitter.cpp render/metal/metal_device.mm)
 target_include_directories(ar_render_metal PUBLIC render/metal)
 set_source_files_properties(render/metal/metal_device.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
@@ -24,21 +29,24 @@ target_include_directories(ar_png PUBLIC platform/macos)
 target_compile_options(ar_png PRIVATE -fobjc-arc)
 target_link_libraries(ar_png PUBLIC "-framework Foundation" "-framework ImageIO" "-framework CoreGraphics")
 endif()
+endif()
 
 add_library(ar_platform_fake STATIC platform/fake/fake_platform.c)
 target_include_directories(ar_platform_fake PUBLIC platform/fake)
 target_link_libraries(ar_platform_fake PUBLIC ar_core)
 
+if(APPLE)
 set_source_files_properties(platform/apple/gc_pad.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 add_library(ar_gc_pad STATIC platform/apple/gc_pad.mm)
 target_include_directories(ar_gc_pad PUBLIC platform/apple)
 target_link_libraries(ar_gc_pad PUBLIC ar_core "-framework GameController" "-framework Foundation")
+endif()
 
 add_library(ar_cube_adapter STATIC adapters/cube/cube_adapter.c)
 target_include_directories(ar_cube_adapter PUBLIC adapters/cube)
 target_link_libraries(ar_cube_adapter PUBLIC ar_core)
 
-if(NOT SM64AR_VISIONOS)
+if(APPLE AND NOT SM64AR_VISIONOS)
 add_library(ar_harness STATIC platform/macos/free_fly.cpp platform/macos/room.cpp
             platform/macos/harness_platform.mm platform/macos/harness_session.mm)
 target_include_directories(ar_harness PUBLIC platform/macos)
