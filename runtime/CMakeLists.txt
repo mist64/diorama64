@@ -72,3 +72,11 @@ if(SM64AR_VISIONOS)
                         "-framework ARKit" "-framework Metal" "-framework Foundation" "-framework AudioToolbox" "-framework AVFAudio"
                         "-framework PHASE")
 endif()
+
+if(SM64AR_HOST_TESTS OR SM64AR_QUEST)
+  find_package(Vulkan REQUIRED)
+  add_library(ar_qx_convert STATIC platform/quest/qx_convert.cpp)
+  target_include_directories(ar_qx_convert PUBLIC platform/quest ${SM64AR_OPENXR_DIR}/include)
+  target_link_libraries(ar_qx_convert PUBLIC ar_core)
+  target_link_libraries(ar_qx_convert PUBLIC Vulkan::Headers)
+endif()
