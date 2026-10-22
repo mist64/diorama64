@@ -16,6 +16,8 @@ baserom*
 Bundled/
 # Build output (prepared upstream trees, fetched dependencies, Xcode projects, apps)
 /build/
+.direnv/
+/result
 DerivedData/
 *.app/
 *.xcappdata/
