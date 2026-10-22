@@ -7,3 +7,5 @@ endfunction()
 
 sm64ar_test(test_runtime_cube test_runtime_cube.cpp)
 sm64ar_test(test_qx_convert test_qx_convert.cpp)
+sm64ar_test(test_glsl_emitter test_glsl_emitter.cpp)
+target_link_libraries(test_glsl_emitter PRIVATE ar_render_common ar_render_vulkan_shaders ar_glsl_compiler)
