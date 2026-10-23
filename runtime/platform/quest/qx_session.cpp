@@ -103,47 +103,21 @@ bool QxSession::start(const std::string &rom_path, const std::string &save_dir, 
     }
     // No game thread: frame() steps the game (step_ticks), as VosSession.
     vos_log("AR_QUEST_SESSION adapter=%s", adapter_->name);
-    // After init_game; a stream that cannot start leaves the game running silent.
+    // After init_game, whatever the game's settings (as VosSession); a stream that cannot start leaves the game silent.
     audio_.reset(new QxAudio(rt_));
-    audio_wanted_ = !audio_setting_ || audio_setting_();
-    audio_checked_ = std::chrono::steady_clock::now();
     audio_focus_ = true;   // the stream starts playing; the first unfocused frame pauses it
-    if (audio_wanted_) start_audio();
-    else vos_log("AR_AUDIO off reason=setting");
-    return true;
-}
-
-void QxSession::start_audio() {
     std::string why;
     audio_on_ = audio_->start(false, &why);
     if (!audio_on_) vos_log("AR_AUDIO off reason=%s", why.c_str());
-    else if (!audio_focus_) audio_->pause();
+    return true;
 }
 
-// Each frame, before the ticks: a disconnected stream reopens, the session's focus pauses or resumes it, and once a
-// second the game's audio setting starts or stops it (only on a change, so a stream that failed to start is retried
-// when the setting is toggled, not every second).
+// Each frame, before the ticks: the session's focus pauses or resumes the stream (neither blocks), then poll() starts a
+// resumed stream once its stop settled and reopens a disconnected one.
 void QxSession::update_audio() {
-    if (!audio_) return;
+    if (!audio_ || !audio_on_) return;
     const ar_platform *api = platform_.api();
     const bool focused = api->session_state && api->session_state(api->user) == AR_SESSION_FOCUSED;
-    const auto now = std::chrono::steady_clock::now();
-    if (audio_setting_ && now - audio_checked_ >= std::chrono::seconds(1)) {
-        audio_checked_ = now;
-        const bool want = audio_setting_();
-        if (want != audio_wanted_) {
-            audio_wanted_ = want;
-            vos_log("AR_AUDIO setting=%s", want ? "on" : "off");
-            if (want && !audio_on_) {
-                audio_focus_ = focused;
-                start_audio();
-            } else if (!want && audio_on_) {
-                audio_->stop();
-                audio_on_ = false;
-            }
-        }
-    }
-    if (!audio_on_) return;
     if (focused != audio_focus_) {
         audio_focus_ = focused;
         if (focused) audio_->resume();

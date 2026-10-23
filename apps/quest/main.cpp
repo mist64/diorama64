@@ -3,7 +3,6 @@
 #include <jni.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <cstring>
 #include <string>
 #include "ar_adapter_sm64.h"
 #include "ar_game_args.h"
@@ -225,11 +224,6 @@ extern "C" void android_main(android_app *app) {
         // vos_app.mm's pointer claim: the Touch trigger's ray drives sm64's title screen and menus. The Quest never
         // records or replays, so the pointer lock stays off. Logged at begin / end / cancel, never per move.
         ar_adapter_sm64_set_pointer_lock(0);
-        // sm64's "audio" setting (on|off) starts and stops the AAudio stream; the session re-reads it once a second.
-        session.set_audio_setting([] {
-            char v[8];
-            return !ar_adapter_sm64_get_setting("audio", v, sizeof v) || std::strcmp(v, "off") != 0;
-        });
         session.set_pointer_claim([](const ar::PointerEvent &e) {
             sm64_pointer p{};
             p.id = e.id; p.phase = (int)e.phase; p.has_hand = e.has_hand ? 1 : 0; p.head = e.head; p.no_ray = e.has_ray ? 0 : 1;

@@ -33,14 +33,14 @@ public:
     // AAudio: PERFORMANCE_MODE_LOW_LATENCY, SHARING_MODE_SHARED, float, 2 channels, 48000 Hz, data + error callbacks;
     // started (playing) on success. spatial=true: Task 2 (fails for now).
     bool start(bool spatial, std::string *err);
-    // Session VISIBLE / FOCUSED transitions. pause() returns once the callback has stopped; resume() drops the game
-    // audio queued meanwhile, so playback resumes at the game's present without a burst.
+    // Session VISIBLE / FOCUSED transitions; neither blocks. pause() requests the stop; resume() restarts once AAudio
+    // reports STOPPED (in poll() if not yet), after dropping the game audio queued meanwhile, so there is no burst.
     void pause();
     void resume();
     // Stops and closes the stream: no callback runs after it returns. Safe to call twice and without start.
     void stop();
-    // Each frame: a disconnected stream (the error callback's flag, or its state) is closed and reopened, the queued
-    // input dropped; a failed reopen is retried once a second.
+    // Each frame: a resume waiting for STOPPED starts the stream; a disconnected stream (the error callback's flag, or
+    // its state) is closed and reopened, the queued input dropped; a failed reopen is retried once a second.
     void poll();
     bool running() const;   // a stream is open and not paused
     bool spatial() const { return spatial_; }
@@ -57,8 +57,7 @@ private:
     static aaudio_data_callback_result_t on_data(AAudioStream *s, void *user, void *data, int32_t frames);
     static void on_error(AAudioStream *s, void *user, aaudio_result_t error);
     bool open_stream(std::string *err);
-    void close_stream();
-    bool stop_stream();     // requestStop, then wait (bounded) until STOPPED; true: the callback is no longer running
+    void close_stream();    // requestStop, a wait for STOPPED bounded to 50 ms (logged when it expires), close
     void reset_input();     // only while no callback runs: a fresh bound and resampler, the runtime's queued audio dropped
 
     ar_runtime *rt_;
@@ -68,6 +67,7 @@ private:
     AAudioStream *stream_ = nullptr;
     bool started_ = false;         // start() succeeded and stop() has not run (the stream may be reopening)
     bool paused_ = false;
+    bool start_pending_ = false;   // resumed while the stop was still settling: poll() starts the stream at STOPPED
     bool spatial_ = false;
     uint64_t trimmed_base_ = 0;    // the trimmed frames of the bounds reset_input replaced
     std::chrono::steady_clock::time_point retry_at_{};
