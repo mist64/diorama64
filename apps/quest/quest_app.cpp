@@ -25,6 +25,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include "ar_adapter_sm64.h"
 #include "sm64_ar_setup.h"
@@ -772,10 +773,20 @@ static void poll_packs() {   // PacksModel.startPolling's refresh
     s.packs_known = true;
     qxapp::load_packs();
 }
+// First-run Look defaults for this headset, applied only to keys the player has never stored (arvos_quest_seed_look).
+// Empty until the performance pass measures a need: the decision rule is in
+// docs/superpowers/plans/2026-10-22-quest-device-checklist.md (Plan 3, Task 8) and the numbers in
+// docs/superpowers/plans/2026-10-22-quest-perf.md. Entries are {look key, value}, e.g. {"msaa", "2"}.
+static const std::pair<const char *, const char *> kQuestLookSeed[] = {};
+
 extern "C" int qx_app_startup(void) {
     AppState &s = state();
     if (!s.options_ok) { ar::vos_log("AR_ERROR startup skipped: %s", s.error.c_str()); return 0; }
     if (!qxapp::prefs()) qxapp::prefs_open(s.docs + "/prefs.json");   // normally opened by arvos_configure
+    // Between arvos_configure and the loads below, so a seeded key is read by load_look like a stored one.
+    if (sizeof kQuestLookSeed == 0) ar::vos_log("AR_LOOK seed none");
+    for (const auto &kv : kQuestLookSeed)
+        if (arvos_quest_seed_look(kv.first, kv.second)) ar::vos_log("AR_LOOK seed %s=%s", kv.first, kv.second);
     // ShellModel.loadGame has nothing to load here (arvos_game, arvos_has_draw_all_rooms are read by the panel).
     // ShellModel.loadSM64World:
     using namespace qxapp;

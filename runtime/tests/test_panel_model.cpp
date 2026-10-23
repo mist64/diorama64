@@ -1,6 +1,7 @@
 // The Quest settings panel's model (apps/quest/panel/panel_model.h) over a fake Bridge.
 #include "check.h"
 #include "panel_model.h"
+#include "panel_raster.h"
 
 #include <map>
 #include <string>
@@ -262,7 +263,39 @@ static void formatting() {
     CHECK(format_value(snap_value(c, 9.f)) == "1.5");
 }
 
+static Action live(const char *id, const char *v, float raw) {
+    Action a; a.kind = Action::set; a.id = id; a.value = v; a.final = false; a.raw = raw; return a;
+}
+
+// The slide keeps the raw accumulator and the sent value apart; the sent value is what is shown, and a trigger pull
+// during a slide ends it so the release does not overwrite the pull.
+static void slide_rules() {
+    Slide s;
+    CHECK(slide_apply(s, live("audio.widen", "1", 1.004f)));
+    CHECK(s.sent == "1" && s.raw == 1.004f);
+    CHECK(!slide_apply(s, live("audio.widen", "1", 1.012f)));   // same sent value: no set, no redraw
+    CHECK(s.raw == 1.012f && s.sent == "1");
+    CHECK(slide_apply(s, live("audio.widen", "1.05", 1.06f)));
+    Action fin = live("audio.widen", "2", 2.f); fin.final = true;
+    CHECK(slide_apply(s, fin) && s.id.empty() && s.sent.empty());   // the trigger wins
+    Action other = live("audio.pan", "0.5", 0.5f); other.final = true;
+    slide_apply(s, live("audio.widen", "1.5", 1.5f));
+    CHECK(slide_apply(s, other) && s.id == "audio.widen");   // a final set elsewhere leaves the slide
+    Action none;
+    CHECK(!slide_apply(s, none));
+}
+
+// Truncation: the longest prefix that fits with the ellipsis; everything when the whole string fits.
+static void text_truncates() {
+    const std::vector<float> adv(10, 10.f);
+    CHECK(Raster::fit_chars(adv, 30.f, 100.f) == 10);   // fits whole
+    CHECK(Raster::fit_chars(adv, 30.f, 95.f) == 6);     // 60 + 30 <= 95, 70 + 30 > 95
+    CHECK(Raster::fit_chars(adv, 30.f, 20.f) == 0);     // not even the ellipsis fits: nothing kept
+}
+
 int main() {
+    slide_rules();
+    text_truncates();
     tabs_in_order();
     every_key_is_a_control();
     enable_rules();

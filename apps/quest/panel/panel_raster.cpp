@@ -167,6 +167,15 @@ void Raster::rect(float x0, float y0, float x1, float y1, const uint8_t c[4], fl
     }
 }
 
+size_t Raster::fit_chars(const std::vector<float> &adv, float ell, float max_w) {
+    float w = 0.f;
+    for (float a : adv) w += a;
+    size_t keep = adv.size();
+    if (w <= max_w) return keep;
+    while (keep > 0 && w + ell > max_w) w -= adv[--keep];
+    return keep;
+}
+
 float Raster::text_width(const std::string &raw, Size sz) const {
     const std::string s = ascii(raw);
     if (const Font *f = fonts_[sz].get()) {
@@ -180,8 +189,11 @@ float Raster::text_width(const std::string &raw, Size sz) const {
 
 float Raster::text(float x, float cy, const std::string &raw, Size sz, const uint8_t c[4], float max_w) {
     std::string s = ascii(raw);
-    if (text_width(s, sz) > max_w) {   // cut to fit with "..."
-        while (!s.empty() && text_width(s + "...", sz) > max_w) s.pop_back();
+    if (text_width(s, sz) > max_w) {   // cut to fit with "..."; advances are per character, so the width is incremental
+        std::vector<float> adv;
+        adv.reserve(s.size());
+        for (char ch : s) adv.push_back(text_width(std::string(1, ch), sz));
+        s.resize(fit_chars(adv, text_width("...", sz), max_w));
         s += "...";
     }
     const float x_start = x;

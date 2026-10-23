@@ -64,6 +64,15 @@ struct Action { enum Type { none, select_tab, set, press, scroll } kind = none; 
 // passes back as the value next frame so a slow push accumulates. Disabled: none.
 Action act_on(const std::vector<Tab> &tabs, int tab, const Hit &h, bool trigger_edge, float stick_x, float dt_s);
 
+// The stick slide in progress (session state, kept pure for the tests): id of the slider, the last value actually sent
+// (what the panel shows, so a slide that rounds to the same step does not redraw) and the unrounded accumulator (what
+// act_on continues from).
+struct Slide { std::string id, sent; float raw = 0.f; };
+// Folds a set action into the slide; returns whether bridge.set must be called (a live set only when the sent value
+// changed; a final set always). A final set on the slide's id ends the slide (a trigger pull during a stick slide wins:
+// the release must not overwrite it). Other actions leave it alone.
+bool slide_apply(Slide &s, const Action &a);
+
 std::string format_value(float v);                       // SwiftUI's LookSlider.format: %g of v rounded to 1/1000
 float snap_value(const Control &c, float v);              // clamped to min..max, rounded to the step from min
 std::string option_label(const Control &c, size_t i);

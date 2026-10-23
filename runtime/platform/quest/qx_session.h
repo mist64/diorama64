@@ -150,8 +150,14 @@ private:
     bool pose_ok_ = false, aim_ok_ = false, aim_hit_ = false;
     float aim_o_[3] = {0.f, 0.f, 0.f}, aim_d_[3] = {0.f, 0.f, -1.f}, aim_end_[3] = {0.f, 0.f, 0.f};
     std::string panel_sig_;
-    std::string slide_id_, slide_sent_;   // the slider the stick is moving (its last value sent, not yet final)
-    float slide_raw_ = 0.f, scroll_acc_ = 0.f;
+    panel::Slide slide_;   // the slider the stick is moving: its last value sent (shown) and the raw accumulator
+    float scroll_acc_ = 0.f;
+    // tabs_, the status and hint text (and so the room-light readout) are rebuilt once a second, on any panel action and
+    // on open, not every frame; hover and hit testing run every frame against the cached tabs.
+    std::string status_cache_, hint_cache_;
+    std::chrono::steady_clock::time_point tabs_built_{};
+    bool tabs_stale_ = true;
+    void refresh_tabs(bool force);
     // Game audio (render thread), running whenever the game runs, as visionOS's (the game's own "audio" setting mutes
     // inside the game). audio_on_: the stream started; audio_focus_: the last session focus applied to it (pause when
     // leaving FOCUSED, resume on return).

@@ -237,7 +237,9 @@ void QxSession::save_pipelines() {
 }
 
 void QxSession::log_perf_window() {
-    vos_log("%s", perf_line(perf_.report()).c_str());
+    // The window's line has hz, cpu_ms p50/p95/max and gpu_ms p50/p95/max already; add the device's counters.
+    vos_log("%s late=%llu deferred=%llu gpu_last_ms=%.2f", perf_line(perf_.report()).c_str(),
+            (unsigned long long)dev_->late_passes(), (unsigned long long)dev_->deferred_draws(), dev_->last_gpu_ms());
     vos_log("AR_MEM phys_mb=%.1f", ar_phys_footprint_mb());
     vos_log("AR_WARMUP deferred_draws=%llu warming=%zu built=%zu promoted=%llu", (unsigned long long)dev_->deferred_draws(),
             dev_->pipelines_warming(), dev_->pipeline_count(), (unsigned long long)dev_->warm_promotions());
@@ -334,7 +336,9 @@ void QxSession::open_panel() {
     panel_.dirty = true;
     pose_ok_ = false;
     panel_sig_.clear();
-    tabs_ = panel::build_tabs(bridge_);
+    slide_ = panel::Slide{};
+    if (platform_.input_focused() && platform_.actions().rt > 0.5f) platform_.hold_until_released(AR_BTN_RB);
+    refresh_tabs(true);
     const std::string want = bridge_.get ? bridge_.get("ui.tab") : std::string();
     panel_.tab = 0;
     for (size_t i = 0; i < tabs_.size(); i++) if (tabs_[i].name == want) panel_.tab = (int)i;
@@ -347,13 +351,25 @@ void QxSession::open_panel() {
 }
 
 void QxSession::close_panel() {
-    if (!slide_id_.empty() && bridge_.set) bridge_.set(slide_id_, slide_sent_, true);   // a slide in progress ends final
-    slide_id_.clear();
+    if (!slide_.id.empty() && bridge_.set) bridge_.set(slide_.id, slide_.sent, true);   // a slide in progress ends final
+    slide_ = panel::Slide{};
     panel_.open = false;
     aim_ok_ = aim_hit_ = false;
 }
 
+// Rebuilds the cached tabs and the status / hint strings (one bridge read each) when forced, flagged stale or a second old.
+void QxSession::refresh_tabs(bool force) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && !tabs_stale_ && now - tabs_built_ < std::chrono::seconds(1)) return;
+    tabs_ = panel::build_tabs(bridge_);
+    status_cache_ = bridge_.status ? bridge_.status() : std::string();
+    hint_cache_ = bridge_.hint ? bridge_.hint() : std::string();
+    tabs_built_ = now;
+    tabs_stale_ = false;
+}
+
 void QxSession::apply_panel_action(const panel::Action &a) {
+    if (a.kind != panel::Action::none) tabs_stale_ = true;   // rebuilt by update_panel after this frame's action
     switch (a.kind) {
     case panel::Action::select_tab:
         if (a.tab < 0 || a.tab >= (int)tabs_.size()) return;
@@ -364,14 +380,11 @@ void QxSession::apply_panel_action(const panel::Action &a) {
         return;
     case panel::Action::set:
         if (!bridge_.set) return;
-        if (!a.final) {   // the stick slides: values go live, the final one when the stick lets go or the ray leaves
-            if (slide_id_ != a.id) { slide_id_ = a.id; slide_sent_.clear(); }
-            slide_raw_ = a.raw;
-            if (a.value != slide_sent_) { bridge_.set(a.id, a.value, false); slide_sent_ = a.value; }
-            return;
-        }
-        bridge_.set(a.id, a.value, true);
-        vos_log("AR_PANEL set %s=%s", a.id.c_str(), a.value.c_str());
+        // The stick slides: values go live, the final one when the stick lets go or the ray leaves. A final set (the
+        // trigger) on the sliding id ends the slide, so the release does not overwrite it (slide_apply).
+        if (!panel::slide_apply(slide_, a)) return;
+        bridge_.set(a.id, a.value, a.final);
+        if (a.final) vos_log("AR_PANEL set %s=%s", a.id.c_str(), a.value.c_str());
         return;
     case panel::Action::press:
         vos_log("AR_PANEL press %s", a.id.c_str());
@@ -388,7 +401,7 @@ void QxSession::apply_panel_action(const panel::Action &a) {
 // the trigger's rising edge and the right stick X acted on, and whether the texture must be re-drawn.
 void QxSession::update_panel(const ar_render_frame &rf, float dt_s) {
     if (!panel_.open) return;
-    tabs_ = panel::build_tabs(bridge_);
+    refresh_tabs(false);
     if (tabs_.empty()) return;
     panel_.tab = std::min(std::max(panel_.tab, 0), (int)tabs_.size() - 1);
     // Over a placed table the panel follows the level and turns to the head; without one it stays where it opened.
@@ -416,22 +429,34 @@ void QxSession::update_panel(const ar_render_frame &rf, float dt_s) {
     }
     panel_.hover = hit;
     const bool trigger = focused && now.rt > 0.5f && !(before.rt > 0.5f);
-    if (trigger && aim_hit_) platform_.hold_until_released(AR_BTN_RB);   // the pull is the panel's, not the game's R
+    // The panel owns the trigger while open: the game never sees R, on the panel or off it.
+    // (armed on the pull, anywhere; the gate holds it until the trigger is released. A pull already held when the panel
+    // opens is armed by open_panel.)
+    if (trigger) platform_.hold_until_released(AR_BTN_RB);
     std::vector<panel::Control> *cs = hit.tab == panel_.tab && hit.control >= 0 ? &tabs_[(size_t)panel_.tab].controls : nullptr;
     panel::Control *c = cs ? &(*cs)[(size_t)hit.control] : nullptr;
     float sx = focused && std::fabs(now.rx) >= kStickDeadZone ? now.rx : 0.f;
     if (!c || c->kind != panel::Kind::slider) sx = 0.f;   // the stick X belongs to a hovered slider only
-    if (!slide_id_.empty() && (sx == 0.f || !c || c->id != slide_id_)) {
-        if (bridge_.set) bridge_.set(slide_id_, slide_sent_, true);
-        vos_log("AR_PANEL set %s=%s", slide_id_.c_str(), slide_sent_.c_str());
-        slide_id_.clear();
+    if (!slide_.id.empty() && (sx == 0.f || !c || c->id != slide_.id)) {
+        if (bridge_.set) bridge_.set(slide_.id, slide_.sent, true);
+        vos_log("AR_PANEL set %s=%s", slide_.id.c_str(), slide_.sent.c_str());
+        slide_ = panel::Slide{};
+        tabs_stale_ = true;
     }
-    if (c && c->id == slide_id_) {   // continue from the unrounded value, so a slow push accumulates
+    if (c && c->id == slide_.id) {   // continue from the unrounded value, so a slow push accumulates
         char b[32];
-        std::snprintf(b, sizeof b, "%.7g", (double)slide_raw_);
+        std::snprintf(b, sizeof b, "%.7g", (double)slide_.raw);
         c->value = b;
     }
     apply_panel_action(panel::act_on(tabs_, panel_.tab, hit, trigger, sx, dt_s));
+    if (tabs_stale_) {   // an action (or a slide's end) changed settings: rebuild before the signature and the draw
+        refresh_tabs(false);
+        if (tabs_.empty()) return;
+        panel_.tab = std::min(panel_.tab, (int)tabs_.size() - 1);
+    }
+    if (!slide_.id.empty())   // the panel shows the value actually sent, not the raw accumulator
+        for (panel::Control &x : tabs_[(size_t)panel_.tab].controls)
+            if (x.id == slide_.id) x.value = slide_.sent;
     // The right stick Y scrolls the rows while the ray is on the panel.
     if (aim_hit_ && std::fabs(now.ry) >= 0.5f) {
         scroll_acc_ -= now.ry * 10.f * dt_s;
@@ -446,7 +471,7 @@ void QxSession::update_panel(const ar_render_frame &rf, float dt_s) {
     // What the texture shows, as one string: re-drawn when it changes.
     std::string sig = std::to_string(panel_.tab) + '|' + std::to_string(panel_.scroll_rows) + '|' + std::to_string(hit.tab) + ',' +
                       std::to_string(hit.control) + ',' + std::to_string(hit.scroll) + ',' + (hit.tab_strip ? "t" : "") + '|';
-    sig += (bridge_.status ? bridge_.status() : std::string()) + '|' + (bridge_.hint ? bridge_.hint() : std::string()) + '|';
+    sig += status_cache_ + '|' + hint_cache_ + '|';
     for (const panel::Control &x : tabs_[(size_t)panel_.tab].controls)
         sig += x.label + '\x1f' + x.value + '\x1f' + x.note + '\x1f' + (x.enabled ? '1' : '0') + '\x1e';
     if (sig != panel_sig_) {
@@ -460,9 +485,7 @@ void QxSession::update_panel(const ar_render_frame &rf, float dt_s) {
 void QxSession::draw_panel(const ar_render_frame &rf) {
     if (!panel_.open || !pose_ok_ || rf.view_count == 0 || !raster_) return;
     if (panel_.dirty) {
-        const std::string status = bridge_.status ? bridge_.status() : std::string();
-        const std::string hint = bridge_.hint ? bridge_.hint() : std::string();
-        raster_->draw(tabs_, panel_.tab, panel_.hover, layout_, panel_.scroll_rows, status, hint);
+        raster_->draw(tabs_, panel_.tab, panel_.hover, layout_, panel_.scroll_rows, status_cache_, hint_cache_);
         dev_->upload_texture(kPanelTexture, raster_->width(), raster_->height(), raster_->rgba());
         panel_.dirty = false;
     }

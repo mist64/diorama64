@@ -369,6 +369,19 @@ bool same_hit(const Hit &a, const Hit &b) {
     return a.tab == b.tab && a.control == b.control && a.tab_strip == b.tab_strip && a.scroll == b.scroll;
 }
 
+bool slide_apply(Slide &s, const Action &a) {
+    if (a.kind != Action::set) return false;
+    if (a.final) {
+        if (s.id == a.id) { s.id.clear(); s.sent.clear(); s.raw = 0.f; }
+        return true;
+    }
+    if (s.id != a.id) { s.id = a.id; s.sent.clear(); }
+    s.raw = a.raw;
+    if (a.value == s.sent) return false;
+    s.sent = a.value;
+    return true;
+}
+
 std::string format_value(float v) {
     char b[32];
     double r = std::round((double)v * 1000.0) / 1000.0;

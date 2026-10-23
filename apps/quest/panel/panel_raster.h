@@ -26,6 +26,10 @@ public:
     uint32_t width() const { return w_; }
     uint32_t height() const { return h_; }
 
+    // How many leading characters (advances adv) fit with an ellipsis of width ell inside max_w: the width is kept
+    // incrementally, one subtraction per removed character (all of them when the whole string fits).
+    static size_t fit_chars(const std::vector<float> &adv, float ell, float max_w);
+
     struct Font;
 private:
     enum Size { small = 0, big = 1 };
