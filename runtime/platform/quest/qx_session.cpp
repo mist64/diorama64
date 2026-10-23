@@ -93,14 +93,23 @@ bool QxSession::frame() {
     const float dt = have_time_ ? std::max(0.f, float(rf.display_time_ns - last_time_) * 1e-9f) : 1.f / 90.f;
     dev_->begin_frame();
     draw_ar_layer(*renderer_, target_, rf, lo, dt);
+    bool resolved = true;
     for (uint32_t i = 0; i < rf.view_count; i++) {
         ExternalView ev{};
-        if (!platform_.external_view(i, &ev)) continue;
+        if (!platform_.external_view(i, &ev)) { resolved = false; continue; }
         ev.src_layer = i;
         ev.linearize = platform_.color_wants_linear();
         dev_->encode_resolve(target_, ev);
     }
-    ar_runtime_submit_frame(rt_, &rf);
+    // A failed begin_frame, a target left without images by the (re)size (its resolve then records nothing) or any
+    // resolve that recorded nothing: submit no views (as the no-draw path), so no unwritten image is composited.
+    if (resolved && vulkan_device_frame_ok(*dev_)) {
+        ar_runtime_submit_frame(rt_, &rf);
+    } else {
+        ar_render_frame none = rf;
+        none.view_count = 0;
+        ar_runtime_submit_frame(rt_, &none);
+    }
     dev_->end_frame(on_done, new Done{rt_, rf}, nullptr);   // vkQueueSubmit before the image is released
     platform_.end_submission();
     last_time_ = rf.display_time_ns;

@@ -4,6 +4,7 @@
 #include <vulkan/vulkan.h>
 #include "ar_platform.h"
 #include "render_device.h"
+#include "vulkan_device.h"
 
 struct android_app;
 
@@ -11,7 +12,7 @@ namespace ar {
 
 struct QxVulkan { VkInstance instance; VkPhysicalDevice physical; VkDevice device; uint32_t queue_family; VkQueue queue;
                   PFN_vkGetInstanceProcAddr get_instance_proc_addr; };
-struct QxSwapchainImage { VkImage image; VkImageView view; VkFormat format; uint32_t width, height, layers; };  // what ExternalView::color points at
+using QxSwapchainImage = VulkanExternalImage;  // what ExternalView::color points at: the device's own type, no pun
 
 // The Quest platform: an OpenXR session on a Vulkan device (XR_KHR_vulkan_enable2), one stereo array swapchain and an
 // XR_FB_passthrough layer under it. All members are for the render thread except api()->get_pad (any thread).

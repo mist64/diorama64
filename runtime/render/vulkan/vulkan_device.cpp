@@ -281,7 +281,8 @@ public:
     void resize_target(uint32_t t, uint32_t w, uint32_t h, uint32_t layers, uint32_t samples) override {
         if (t == 0 || t > targets_.size()) return;
         Target &x = targets_[t - 1];
-        if (x.w != std::max(w, 1u) || x.h != std::max(h, 1u) || x.layers != std::max(layers, 1u) || !x.color.img)
+        if (x.w != std::max(w, 1u) || x.h != std::max(h, 1u) || x.layers != std::max(layers, 1u) ||
+            x.samples != render_samples(samples) || !x.color.img)
             make_target(x, w, h, layers, samples);
     }
     uint32_t supported_samples(uint32_t wanted, uint32_t layers) const override { (void)wanted; (void)layers; return 1; }
@@ -382,15 +383,20 @@ public:
     void encode_composite(uint32_t, void *, uint32_t, uint32_t) override {}
 
     // The full-screen copy of one target slice into the external image's slice dst.slice (metal_device.mm encode_resolve).
+    // A resolve that records nothing marks the frame not ok (vulkan_device_frame_ok).
     void encode_resolve(uint32_t src, const ExternalView &dst) override {
-        if (!frame_open_ || src == 0 || src > targets_.size() || !dst.color) return;
+        if (!record_resolve(src, dst)) frame_ok_ = false;
+    }
+    bool frame_ok() const { return frame_ok_; }
+    bool record_resolve(uint32_t src, const ExternalView &dst) {
+        if (!frame_open_ || src == 0 || src > targets_.size() || !dst.color) return false;
         Target &s = targets_[src - 1];
-        if (!s.color.img) return;
+        if (!s.color.img) return false;
         flush(s);
         const VulkanExternalImage &ci = *static_cast<const VulkanExternalImage *>(dst.color);
         const VulkanExternalImage *di = static_cast<const VulkanExternalImage *>(dst.depth);
-        if (dst.src_layer >= s.layers) { vos_log("AR_VULKAN resolve of slice %u from a target with %u", dst.src_layer, s.layers); return; }
-        if (dst.slice >= ci.layers || (di && dst.slice >= di->layers)) { vos_log("AR_VULKAN resolve into slice %u of %u", dst.slice, ci.layers); return; }
+        if (dst.src_layer >= s.layers) { vos_log("AR_VULKAN resolve of slice %u from a target with %u", dst.src_layer, s.layers); return false; }
+        if (dst.slice >= ci.layers || (di && dst.slice >= di->layers)) { vos_log("AR_VULKAN resolve into slice %u of %u", dst.slice, ci.layers); return false; }
         if (di && !s.depth_sample) {
             if (!depth_sample_warned_) vos_log("AR_VULKAN resolve: target depth is not sampleable here: colour only");
             depth_sample_warned_ = true;
@@ -398,7 +404,7 @@ public:
         }
         VkRenderPass rp = resolve_render_pass(ci.format, di ? di->format : VK_FORMAT_UNDEFINED);
         VkPipeline ps = rp ? resolve_pipeline(rp, di != nullptr) : VK_NULL_HANDLE;
-        if (!ps) { vos_log("AR_VULKAN no resolve pipeline for colour %d / depth %d", (int)ci.format, di ? (int)di->format : 0); return; }
+        if (!ps) { vos_log("AR_VULKAN no resolve pipeline for colour %d / depth %d", (int)ci.format, di ? (int)di->format : 0); return false; }
         VkImageView views[2] = {make_view(ci.image, VK_IMAGE_VIEW_TYPE_2D, ci.format, VK_IMAGE_ASPECT_COLOR_BIT, dst.slice, 1, 1),
                                 di ? make_view(di->image, VK_IMAGE_VIEW_TYPE_2D, di->format, depth_aspects(di->format), dst.slice, 1, 1)
                                    : VK_NULL_HANDLE};
@@ -416,9 +422,9 @@ public:
             if (fb) vkDestroyFramebuffer(dv, fb, nullptr);
             for (VkImageView v : views) if (v) vkDestroyImageView(dv, v, nullptr);
         });
-        if (!fb) { vos_log("AR_VULKAN resolve: framebuffer creation failed"); return; }
+        if (!fb) { vos_log("AR_VULKAN resolve: framebuffer creation failed"); return false; }
         VkDescriptorSet set = alloc_set(resolve_set_layout_);
-        if (!set) return;
+        if (!set) return false;
         VkDescriptorImageInfo ii[2] = {{nearest_, s.color.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                                        {nearest_, s.color.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
         if (s.depth_sample) ii[1] = {nearest_, s.depth_sample, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
@@ -441,7 +447,7 @@ public:
         const VkViewport vp{v.x, v.y, v.w, v.h, 0.f, 1.f};   // no flip: the triangle covers it and reads gl_FragCoord
         vkCmdSetViewport(cmd_, 0, 1, &vp);
         VkRect2D sc;
-        if (!scissor_for(v, ci.width, ci.height, &sc)) { vkCmdEndRenderPass(cmd_); return; }
+        if (!scissor_for(v, ci.width, ci.height, &sc)) { vkCmdEndRenderPass(cmd_); return false; }
         vkCmdSetScissor(cmd_, 0, 1, &sc);
         const uint32_t vw = std::max(1u, (uint32_t)std::ceil(v.w)), vh = std::max(1u, (uint32_t)std::ceil(v.h));
         const ResolveU u = {{v.x, v.y}, {dst.src_x, dst.src_y}, {dst.src_x + vw - 1, dst.src_y + vh - 1}, dst.linearize ? 1u : 0u,
@@ -452,13 +458,16 @@ public:
         vkCmdDraw(cmd_, 3, 1, 0, 0);
         vkCmdEndRenderPass(cmd_);
         encoders_++;
+        return true;
     }
 
     // -----------------------------------------------------------------------------------------------------------------
     // Frame
     // -----------------------------------------------------------------------------------------------------------------
     void begin_frame() override {
-        if (!ok_ || frame_open_) return;
+        if (frame_open_) return;
+        frame_ok_ = false;   // true only once the frame's command buffer is open
+        if (!ok_) return;
         slot_ = (slot_ + 1) % kFrames;
         Frame &f = frames_[slot_];
         {   // the slot's previous frame completed and the completion thread is done with its fence and queries
@@ -482,6 +491,7 @@ public:
         }
         f.serial = ++frame_serial_;
         frame_open_ = true;
+        frame_ok_ = true;
         encoders_ = 0;
         for (Target &t : targets_) t.encoded = false;
     }
@@ -1050,12 +1060,13 @@ private:
     // -----------------------------------------------------------------------------------------------------------------
     // Targets (internals)
     // -----------------------------------------------------------------------------------------------------------------
+    // The sample count a target asked for `samples` is built with (resize_target compares it): 1 in this plan.
+    static uint32_t render_samples(uint32_t samples) { (void)samples; return 1; }
     void make_target(Target &t, uint32_t w, uint32_t h, uint32_t layers, uint32_t samples) {
-        (void)samples;   // rendered at 1 sample in this plan
         flush(t);
         retire_target(t);
         w = std::max(w, 1u); h = std::max(h, 1u); layers = std::max(layers, 1u);
-        t.w = w; t.h = h; t.layers = layers; t.samples = 1;
+        t.w = w; t.h = h; t.layers = layers; t.samples = render_samples(samples);
         if (!ok_) return;
         const VkImageUsageFlags su = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         bool ok = make_image(VK_IMAGE_TYPE_2D, kColorFormat, {w, h, 1}, 1, layers, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | su, 0, &t.color) &&
@@ -1423,6 +1434,7 @@ private:
     uint32_t slot_ = 0;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;   // the open frame's
     bool frame_open_ = false;
+    bool frame_ok_ = false;                  // vulkan_device_frame_ok
     uint64_t frame_serial_ = 0;              // the last frame begun
     uint32_t encoders_ = 0, encoders_last_ = 0;
     std::deque<Garbage> garbage_;
@@ -1442,4 +1454,5 @@ std::unique_ptr<IRenderDevice> create_vulkan_device(const VulkanDeviceInit &init
     if (!d->ok()) return nullptr;   // the constructor logged "AR_VULKAN init failed: ..."
     return d;
 }
+bool vulkan_device_frame_ok(IRenderDevice &d) { return static_cast<VulkanDevice &>(d).frame_ok(); }
 }
