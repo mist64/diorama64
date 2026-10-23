@@ -137,4 +137,4 @@ def resize_png_cmd(src, dst, cap):
     if IS_MAC:
         return (["/usr/bin/sips", "-Z", str(cap), str(src), "--out", str(dst)] if cap
                 else ["/usr/bin/sips", "-s", "format", "png", str(src), "--out", str(dst)])
-    return ["magick", str(src), "-resize", f"{cap}x{cap}>", f"png:{dst}"] if cap else ["magick", str(src), f"png:{dst}"]
+    return ["magick", f"png:{src}", "-resize", f"{cap}x{cap}>", f"png:{dst}"] if cap else ["magick", f"png:{src}", f"png:{dst}"]

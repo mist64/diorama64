@@ -11,8 +11,8 @@ import sm64ar_common as common  # noqa: E402
 class PackHelperTests(unittest.TestCase):
     def test_resize_cmd_linux(self):
         with mock.patch.object(common, "IS_MAC", False):
-            self.assertEqual(common.resize_png_cmd("a.png", "b.png", 512), ["magick", "a.png", "-resize", "512x512>", "png:b.png"])
-            self.assertEqual(common.resize_png_cmd("a.png", "b.png", None), ["magick", "a.png", "png:b.png"])
+            self.assertEqual(common.resize_png_cmd("a.png", "b.png", 512), ["magick", "png:a.png", "-resize", "512x512>", "png:b.png"])
+            self.assertEqual(common.resize_png_cmd("a.png", "b.png", None), ["magick", "png:a.png", "png:b.png"])
 
     def test_resize_cmd_mac(self):
         with mock.patch.object(common, "IS_MAC", True):
