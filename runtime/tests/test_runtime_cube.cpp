@@ -1,10 +1,14 @@
 #include "check.h"
 #include <cmath>
 #include "ar_runtime.h"
+#include "ar_mem_stats.h"
 #include "cube_adapter.h"
 #include "fake_platform.h"
 
 int main() {
+#if defined(__linux__) || defined(__APPLE__)
+    CHECK(ar_phys_footprint_mb() > 0.0);
+#endif
     fake_platform fp;
     fake_platform_init(&fp, 90.0);
     fp.stop_after = 10;

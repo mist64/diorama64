@@ -14,7 +14,7 @@ BUILD_FLAGS = ["DISCORD_SDK=0", "COOPNET=0", "UPDATER=0", "USE_APP=0"]
 # Homebrew formulae the build needs (make: GNU make, since upstream's Makefile needs more than macOS's make 3.81).
 FORMULAE = ("cmake", "ninja", "make", "sdl2", "glew")
 # Linux (the Nix dev shell): the programs on PATH and the pkg-config modules the oracle build and pack prep need.
-LINUX_TOOLS = ("cmake", "ninja", "make", "pkg-config", "magick", "bsdtar")
+LINUX_TOOLS = ("cmake", "ninja", "make", "pkg-config", "magick", "bsdtar", "adb")
 LINUX_PKGS = ("sdl2", "glew")
 HARNESS = ROOT / "build" / "macos" / "harness" / "bin" / "sm64ar_harness"
 PACK_TOOL = ROOT / "build" / "host" / "pack_tool" / "sm64ar_pack_tool"
