@@ -30,6 +30,9 @@ elseif(NOT APPLE)
   set(SM64_SDL sm64_sdl_stub)
   set(SM64_PLATFORM_DEFINES "")
   if(ANDROID)
+    # Bionic's <strings.h> defines bcopy/bzero as macros, which PR/os_libc.h's fallback extern declarations would
+    # expand; this is upstream's own switch to its memcpy/memset path.
+    set(SM64_PLATFORM_DEFINES NO_BZERO_BCOPY)
     set(SM64_PLATFORM_LIBS z log android)
   else()
     find_package(Threads REQUIRED)

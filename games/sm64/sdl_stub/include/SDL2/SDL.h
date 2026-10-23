@@ -3,6 +3,7 @@
 #pragma once
 #include <ctype.h>   /* real SDL.h includes it (SDL_stdinc.h); upstream relies on that (djui_text.c iscntrl) */
 #include <stdint.h>
+#include <string.h>  /* real SDL.h includes it (SDL_stdinc.h); upstream relies on that (controller_bind_mapping.c strlen) */
 #ifdef __cplusplus
 extern "C" {
 #endif
