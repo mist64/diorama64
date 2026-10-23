@@ -3,8 +3,11 @@
 #include <jni.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <cstring>
+#include <functional>
 #include <string>
 #include "ar_adapter_sm64.h"
+#include "ar_audio_settings.h"
 #include "ar_game_args.h"
 #include "cube_adapter.h"
 #include "look.h"
@@ -38,7 +41,7 @@ void pump(android_app *app, int timeout_ms) {
 }
 
 // The launch intent's extras (adb shell am start -S -n ... --es game sm64 --es start story --ez fixed_table true
-// --es look msaa=2,shadows=0 --ez replace true --ez scan true). The activity is singleTask and NativeActivity reads only
+// --es look msaa=2,shadows=0 --es audio head_focus=0.8,widen=1.5 --ez replace true --ez scan true). The activity is singleTask and NativeActivity reads only
 // the launch intent, so an extra applies to a fresh start (-S stops the running app first).
 struct LaunchExtras {
     std::string game = "sm64";
@@ -47,6 +50,7 @@ struct LaunchExtras {
     bool replace = false;       // "Re-place table" until plan 3's panel: the nearest table, offset reset
     bool scan = false;          // run Space Setup (scene capture), then read the scan again
     std::string look;   // launch look overrides: key=value,key=value (look.h's keys)
+    std::string audio;  // launch audio overrides: key=value,key=value (ar_audio_settings.h's keys)
 };
 
 LaunchExtras read_extras(ANativeActivity *activity) {
@@ -80,6 +84,7 @@ LaunchExtras read_extras(ANativeActivity *activity) {
         str_extra("game", &out.game);
         str_extra("start", &out.start);
         str_extra("look", &out.look);
+        str_extra("audio", &out.audio);
         auto bool_extra = [&](const char *key, bool *dst) {
             if (!get_bool) return;
             jstring k = env->NewStringUTF(key);
@@ -160,7 +165,9 @@ bool setup_sm64(const std::string &start, std::string *err) {
 
 // The look overrides of the launch extra "look" (key=value,key=value) into the store, each applied one logged
 // (AR_LOOK key=value) and each refused one logged with why. Until plan 3's panel the only way to change the look.
-void apply_look_overrides(const std::string &spec, ar::LookStore *store) {
+// Each key=value item of spec through set, logged as "<tag> key=value" or "<tag> refused item: why".
+void apply_overrides(const std::string &spec, const char *tag,
+                     const std::function<bool(const std::string &, const std::string &, std::string *)> &set) {
     size_t at = 0;
     while (at <= spec.size()) {
         size_t end = spec.find(',', at);
@@ -171,13 +178,36 @@ void apply_look_overrides(const std::string &spec, ar::LookStore *store) {
         const size_t eq = item.find('=');
         std::string why;
         if (eq == std::string::npos || eq == 0) {
-            ar::vos_log("AR_LOOK refused %s: not key=value", item.c_str());
-        } else if (!store->set(item.substr(0, eq), item.substr(eq + 1), &why)) {
-            ar::vos_log("AR_LOOK refused %s: %s", item.c_str(), why.c_str());
+            ar::vos_log("%s refused %s: not key=value", tag, item.c_str());
+        } else if (!set(item.substr(0, eq), item.substr(eq + 1), &why)) {
+            ar::vos_log("%s refused %s: %s", tag, item.c_str(), why.c_str());
         } else {
-            ar::vos_log("AR_LOOK %s", item.c_str());
+            ar::vos_log("%s %s", tag, item.c_str());
         }
     }
+}
+void apply_look_overrides(const std::string &spec, ar::LookStore *store) {
+    apply_overrides(spec, "AR_LOOK", [store](const std::string &k, const std::string &v, std::string *why) { return store->set(k, v, why); });
+}
+// The audio overrides of the launch extra "audio" into the store.
+void apply_audio_overrides(const std::string &spec, ar::AudioStore *store) {
+    apply_overrides(spec, "AR_AUDIO_SET", [store](const std::string &k, const std::string &v, std::string *why) { return store->set(k, v, why); });
+}
+// vos_app.mm's apply_audio_to_game: the store's game-side settings (focus, the music ring) to sm64.
+void apply_audio_to_sm64(const ar::AudioSettings &a) {
+    ar_adapter_sm64_set_player_focus(a.player_focus);
+    ar_adapter_sm64_set_object_focus(a.object_focus);
+    ar_adapter_sm64_set_music_ring(a.music_ring, a.ring_radius, a.ring_rotate);
+    ar_adapter_sm64_set_ring_listener(a.ring_at_head, a.ring_focus);
+}
+// sm64's audio settings for QxSession: "sound" spatial|stereo, "resampler" sinc|linear (feed_choice 0 | 1, as
+// vos_app.mm's sm64_resampler_choice).
+ar::QxSession::AudioChoice sm64_audio_choice() {
+    ar::QxSession::AudioChoice c;
+    char v[16];
+    c.spatial = ar_adapter_sm64_get_setting("sound", v, sizeof v) && std::strcmp(v, "spatial") == 0;
+    c.resampler = ar_adapter_sm64_get_setting("resampler", v, sizeof v) && std::strcmp(v, "linear") == 0 ? 1 : 0;
+    return c;
 }
 
 }  // namespace
@@ -191,10 +221,13 @@ extern "C" void android_main(android_app *app) {
     ar::vos_log("AR_ADAPTERS sm64=%s abi=%u", ar_adapter_sm64()->name, ar_adapter_sm64()->abi_version);
     app->onAppCmd = on_cmd;
     const LaunchExtras extras = read_extras(app->activity);
-    ar::vos_log("AR_QUEST_INTENT game=%s start=%s fixed_table=%d replace=%d scan=%d look=%s", extras.game.c_str(),
-                extras.start.c_str(), extras.fixed_table ? 1 : 0, extras.replace ? 1 : 0, extras.scan ? 1 : 0, extras.look.c_str());
+    ar::vos_log("AR_QUEST_INTENT game=%s start=%s fixed_table=%d replace=%d scan=%d look=%s audio=%s", extras.game.c_str(),
+                extras.start.c_str(), extras.fixed_table ? 1 : 0, extras.replace ? 1 : 0, extras.scan ? 1 : 0, extras.look.c_str(),
+                extras.audio.c_str());
     ar::LookStore look;   // outlives the session (declared before it)
     apply_look_overrides(extras.look, &look);
+    ar::AudioStore audio;   // likewise
+    apply_audio_overrides(extras.audio, &audio);
 
     // Fallback: the cube, so a missing or refused game still leaves passthrough (and a log line saying why) up.
     std::string game_name = extras.game, rom;
@@ -220,7 +253,10 @@ extern "C" void android_main(android_app *app) {
     app->userData = &platform;
     ar::QxSession session(adapter, platform, internal);
     session.set_look_store(&look);
+    session.set_audio_store(&audio);
     if (game_name == "sm64") {
+        apply_audio_to_sm64(audio.get());
+        session.set_audio_choice(sm64_audio_choice);
         // vos_app.mm's pointer claim: the Touch trigger's ray drives sm64's title screen and menus. The Quest never
         // records or replays, so the pointer lock stays off. Logged at begin / end / cancel, never per move.
         ar_adapter_sm64_set_pointer_lock(0);

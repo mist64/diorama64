@@ -1,8 +1,11 @@
-// runtime/platform/quest/qx_audio.cpp — vos_audio.mm's stereo path on AAudio.
+// runtime/platform/quest/qx_audio.cpp — vos_audio.mm's stereo path on AAudio, and the spatial mode's scene panned to stereo.
 #include "qx_audio.h"
 #include <algorithm>
 #include <cstring>
+extern "C" {
 #include "ar_audio_types.h"
+#include "ar_math.h"
+}
 #include "vos_log.h"
 
 namespace ar {
@@ -21,6 +24,38 @@ uint32_t QxAudio::pull_game(void *user, int16_t *stereo, uint32_t frames) {
     return ar_runtime_pull_audio(static_cast<QxAudio *>(user)->rt_, stereo, frames);
 }
 
+uint32_t QxAudio::pull_scene(void *user, ar_audio_pull *p) {
+    return ar_runtime_pull_audio_scene(static_cast<QxAudio *>(user)->rt_, p);
+}
+
+// The callback's spatial path. The newest plan is taken without waiting (the triple buffer's exchange); a lane whose
+// emitter changed (another nonzero id) starts at the new plan, as SceneFeed's snap; any other lane ramps from where the
+// previous chunk ended. Each chunk is one SceneFeed cycle: every channel rendered under one key (the first call renders
+// the cycle, the rest copy it), interleaved, then panned. The feed counts what it could not cover as missing.
+void QxAudio::render_spatial(float *out, uint32_t total) {
+    if (plan_mid_.load(std::memory_order_acquire) & kPlanFresh)
+        plan_front_ = plan_mid_.exchange(plan_front_, std::memory_order_acq_rel) & 3u;
+    const PlanSlot &p = plans_[plan_front_];
+    for (uint32_t l = 0; l < AR_AUDIO_MAX_SOURCES; l++) {
+        if (p.id[l] == prev_id_[l]) continue;
+        if (prev_id_[l] != 0 && p.id[l] != 0) prev_[l] = p.lane[l];
+        prev_id_[l] = p.id[l];
+    }
+    for (uint32_t done = 0; done < total;) {
+        const uint32_t n = std::min<uint32_t>(total - done, kMaxChunk);
+        const uint64_t key = key_++;
+        for (uint32_t c = 0; c < kSceneChannels; c++) feed_->render(key, n, c, &planar_[(size_t)c * n]);
+        for (uint32_t c = 0; c < kSceneChannels; c++) {
+            const float *src = &planar_[(size_t)c * n];
+            float *dst = &inter_[c];
+            for (uint32_t f = 0; f < n; f++) dst[(size_t)f * kSceneChannels] = src[f];
+        }
+        qx_panner_mix(inter_.data(), n, prev_, p.lane, 1.f, out + 2 * (size_t)done);   // the bed's gain is the feed's
+        std::memcpy(prev_, p.lane, sizeof prev_);
+        done += n;
+    }
+}
+
 // AAudio's real-time thread: no allocation, no lock, no logging. The pull ends in ar_audio_ring_read, which returns 0
 // frames at once while the game thread is writing; what the bound's queue cannot cover plays as silence and is counted
 // as missing, exactly as vos_audio.mm's render_cb.
@@ -28,6 +63,11 @@ aaudio_data_callback_result_t QxAudio::on_data(AAudioStream *, void *user, void 
     auto *a = static_cast<QxAudio *>(user);
     float *out = static_cast<float *>(data);
     const uint32_t total = frames > 0 ? (uint32_t)frames : 0;
+    if (a->spatial_) {   // set only while no stream is open
+        a->render_spatial(out, total);
+        a->frames_.fetch_add(total, std::memory_order_relaxed);
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
     uint64_t missing = 0;
     for (uint32_t done = 0; done < total;) {
         const uint32_t n = std::min<uint32_t>(total - done, kMaxChunk);
@@ -47,8 +87,40 @@ void QxAudio::on_error(AAudioStream *, void *user, aaudio_result_t) {
 
 void QxAudio::reset_input() {
     if (bound_) trimmed_base_ += bound_->trimmed();
-    rs_.reset(new StereoResampler(AR_AUDIO_RATE_HZ, kOutHz, kMaxChunk));
-    bound_.reset(new AudioLatencyBound(kAudioQueueFrames, kAudioStandingFrames, kAudioWindowFrames, pull_game, this));
+    if (feed_) {
+        feed_base_[0] += feed_->missing();
+        feed_base_[1] += feed_->trimmed();
+        feed_base_[2] += feed_->busy();
+        feed_base_[3] += feed_->stale();
+    }
+    if (spatial_) {
+        rs_.reset();
+        bound_.reset();
+        SceneFeed::Config c;   // queue, standing and window: vos_latency.h's, as the stereo bound
+        c.in_hz = AR_AUDIO_RATE_HZ;
+        c.out_hz = kOutHz;
+        c.max_block = kMaxChunk;
+        c.polyphase = polyphase_;
+        feed_.reset(new SceneFeed(c, pull_scene, this));
+        feed_->set_poly_mode(poly_mode_);
+        feed_->set_bed_gain(ar_db_to_gain(tuning_.music_db));
+        positions_ = ScenePositions();
+        for (PlanSlot &p : plans_) p = PlanSlot{};
+        plan_mid_.store(1, std::memory_order_relaxed);
+        plan_back_ = 0;
+        plan_front_ = 2;
+        std::memset(prev_, 0, sizeof prev_);
+        std::memset(prev_id_, 0, sizeof prev_id_);
+        key_ = 0;
+        planar_.assign((size_t)kSceneChannels * kMaxChunk, 0.f);
+        inter_.assign((size_t)kSceneChannels * kMaxChunk, 0.f);
+    } else {
+        feed_.reset();
+        std::vector<float>().swap(planar_);
+        std::vector<float>().swap(inter_);
+        rs_.reset(new StereoResampler(AR_AUDIO_RATE_HZ, kOutHz, kMaxChunk));
+        bound_.reset(new AudioLatencyBound(kAudioQueueFrames, kAudioStandingFrames, kAudioWindowFrames, pull_game, this));
+    }
     // The game kept writing while nothing pulled: drop it (the runtime's ring has one consumer, and no callback runs).
     for (uint32_t i = 0; i < kDrainMaxBlocks && ar_runtime_pull_audio(rt_, drain_.data(), kDrainBlock) == kDrainBlock; i++) {}
 }
@@ -107,7 +179,7 @@ void QxAudio::close_stream() {
 
 bool QxAudio::start(bool spatial, std::string *err) {
     if (started_) { *err = "audio already started"; return false; }
-    if (spatial) { *err = "spatial audio: Task 2"; return false; }
+    spatial_ = spatial;   // no stream is open: the callback reads it only from the stream opened below on
     reset_input();
     if (!open_stream(err)) return false;
     const aaudio_result_t r = AAudioStream_requestStart(stream_);
@@ -118,9 +190,9 @@ bool QxAudio::start(bool spatial, std::string *err) {
     }
     started_ = true;
     paused_ = start_pending_ = false;
-    spatial_ = false;
-    vos_log("AR_AUDIO backend=aaudio rate=%d burst=%d", (int)AAudioStream_getSampleRate(stream_),
-            (int)AAudioStream_getFramesPerBurst(stream_));
+    vos_log("AR_AUDIO backend=aaudio mode=%s rate=%d burst=%d%s", spatial_ ? "spatial" : "stereo",
+            (int)AAudioStream_getSampleRate(stream_), (int)AAudioStream_getFramesPerBurst(stream_),
+            spatial_ ? (polyphase_ ? (poly_mode_ == PolyMode::linear ? " resampler=linear" : " resampler=sinc") : " resampler=feed") : "");
     return true;
 }
 
@@ -207,10 +279,48 @@ void QxAudio::stop() {
 
 bool QxAudio::running() const { return started_ && !paused_ && stream_ != nullptr; }
 
-uint64_t QxAudio::trimmed_in() const { return trimmed_base_ + (bound_ ? bound_->trimmed() : 0); }
+uint64_t QxAudio::missing_in() const {
+    return missing_.load(std::memory_order_relaxed) + feed_base_[0] + (feed_ ? feed_->missing() : 0);
+}
+uint64_t QxAudio::trimmed_in() const {
+    return trimmed_base_ + (bound_ ? bound_->trimmed() : 0) + feed_base_[1] + (feed_ ? feed_->trimmed() : 0);
+}
+uint64_t QxAudio::feed_busy() const { return feed_base_[2] + (feed_ ? feed_->busy() : 0); }
+uint64_t QxAudio::feed_stale() const { return feed_base_[3] + (feed_ ? feed_->stale() : 0); }
 
-void QxAudio::set_tuning(const ar_audio_tuning &) {}
-void QxAudio::set_poly_mode(PolyMode) {}
-void QxAudio::listener(const ar_pose &, const ar_pose &) {}
+void QxAudio::set_tuning(const ar_audio_tuning &t) {
+    tuning_ = t;
+    ar_audio_tuning_clamp(&tuning_);
+    if (feed_) feed_->set_bed_gain(ar_db_to_gain(tuning_.music_db));   // atomic: the next cycle ramps to it
+}
+
+void QxAudio::set_poly_mode(PolyMode m) {
+    poly_mode_ = m;
+    if (feed_) feed_->set_poly_mode(m);   // atomic
+}
+
+void QxAudio::set_feed_choice(const FeedChoice &fc) {
+    polyphase_ = fc.polyphase;
+    set_poly_mode(fc.mode);
+}
+
+// The render thread's half of the spatial mode (see qx_audio.h). The scene's listener is the head in table space the
+// adapter recorded with the tick being heard; an adapter that records none (a zero quaternion), or no metadata yet, falls
+// back to this frame's head. No metadata yet: every lane silent.
+void QxAudio::listener(const ar_pose &tracking_from_head, const ar_pose &tracking_from_table) {
+    head_ = ar_pose_mul(ar_pose_inverse(tracking_from_table), tracking_from_head);
+    if (!spatial_ || !feed_) return;
+    ar_audio_tick_meta m;
+    while (feed_->pop_meta(&m)) positions_.push(m);
+    ar_audio_source lanes[AR_AUDIO_MAX_SOURCES];
+    ar_pose lis{};
+    const bool have = positions_.at(feed_->heard_frame(), lanes, &lis);
+    if (!have) std::memset(lanes, 0, sizeof lanes);
+    if (!have || (lis.quat[0] == 0.f && lis.quat[1] == 0.f && lis.quat[2] == 0.f && lis.quat[3] == 0.f)) lis = head_;
+    PlanSlot &s = plans_[plan_back_];
+    qx_panner_plan(tuning_, lis, lanes, s.lane);
+    for (uint32_t l = 0; l < AR_AUDIO_MAX_SOURCES; l++) s.id[l] = s.lane[l].active ? lanes[l].id : 0;
+    plan_back_ = plan_mid_.exchange((uint8_t)(plan_back_ | kPlanFresh), std::memory_order_acq_rel) & 3u;
+}
 
 }  // namespace ar

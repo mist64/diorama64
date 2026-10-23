@@ -1,5 +1,5 @@
 // The Quest session: the shared runtime and renderer on QxPlatform's OpenXR frame loop and the Vulkan device, the
-// counterpart of VosSession without audio (plan 3), foveation, the render probe or sarec replays: the room-lit look from
+// counterpart of VosSession without foveation, the render probe or sarec replays: the room-lit look from
 // a LookStore (the fixed key light: the Quest has no environment probe), MSAA with background pipeline warming, the
 // pipeline list at files_dir/pipelines.txt, and the AR_PERF / AR_HITCH / AR_MSAA / AR_LIGHT / AR_AO logs.
 //
@@ -17,6 +17,7 @@
 extern "C" {
 #include "ar_runtime.h"
 }
+#include "ar_audio_settings.h"
 #include "look.h"
 #include "qx_audio.h"
 #include "qx_platform.h"
@@ -45,6 +46,15 @@ public:
     std::string status() const;   // one line: the game, its tick, whether the table is placed
     // Before start; the store outlives the session. Re-read on the render thread when its generation changes.
     void set_look_store(const LookStore *store) { look_store_ = store; }
+    // Before start; the store outlives the session. On a generation change (render thread): the spatial tuning
+    // (spatializer and show_sources have no use on the Quest).
+    void set_audio_store(const AudioStore *store) { audio_store_ = store; }
+    // The game's audio choices (sm64's "sound" and "resampler" settings), read before init_game and then once a second;
+    // unset (any other game): stereo. spatial at start puts the runtime in SOURCES mode, which cannot change after
+    // init_game: a later switch to spatial in a game started in stereo is logged (AR_AUDIO spatial needs restart) and
+    // stays stereo; any other switch restarts the stream in the other mode.
+    struct AudioChoice { bool spatial = false; int resampler = 0; };   // resampler: feed_choice's index
+    void set_audio_choice(std::function<AudioChoice()> fn) { audio_choice_ = std::move(fn); }
     void set_world_clip(bool floor, bool box) { wclip_floor_ = floor; wclip_box_ = box; }
     // The key light's steering (on, direction in table axes) whenever it changes; render thread.
     void set_key_light_callback(void (*fn)(void *ctx, int on, const float dir[3]), void *ctx) { light_.set_key_light_callback(fn, ctx); }
@@ -70,7 +80,9 @@ private:
     void log_perf_window();
     void record_perf(int64_t display_ns, std::chrono::steady_clock::time_point cpu_start, uint64_t ticks_before);
     void submit_empty(const ar_render_frame &rf);
-    void update_audio();
+    void update_audio(const ar_render_frame &rf);
+    void apply_audio_store();
+    void poll_audio_choice();
 
     const ar_adapter *adapter_;
     QxPlatform &platform_;
@@ -111,6 +123,13 @@ private:
     // leaving FOCUSED, resume on return).
     std::unique_ptr<QxAudio> audio_;
     bool audio_on_ = false, audio_focus_ = true;
+    const AudioStore *audio_store_ = nullptr;
+    uint64_t audio_gen_ = 0;
+    std::function<AudioChoice()> audio_choice_;
+    bool audio_sources_ = false;   // the runtime was put in SOURCES mode before init_game
+    bool want_spatial_ = false;    // the game's last "sound" choice
+    int resampler_now_ = -1;
+    std::chrono::steady_clock::time_point choice_at_{};
 };
 
 }

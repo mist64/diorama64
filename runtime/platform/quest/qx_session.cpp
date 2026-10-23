@@ -97,6 +97,13 @@ bool QxSession::start(const std::string &rom_path, const std::string &save_dir, 
     ar_runtime_set_texture_sink(rt_, upload, dev_.get());
     if (!save_dir.empty() && ::mkdir(save_dir.c_str(), 0700) != 0 && errno != EEXIST)
         vos_log("AR_QUEST save folder %s: mkdir failed (errno %d)", save_dir.c_str(), errno);
+    // The audio mode is fixed at init_game: SOURCES when the game asks for spatial sound and the adapter has lanes.
+    const AudioChoice choice = audio_choice_ ? audio_choice_() : AudioChoice{};
+    audio_sources_ = choice.spatial && ar_runtime_set_audio_mode(rt_, AR_AUDIO_MODE_SOURCES) != 0;
+    if (choice.spatial && !audio_sources_) vos_log("AR_AUDIO spatial refused: the adapter is stereo only");
+    want_spatial_ = choice.spatial;
+    resampler_now_ = choice.resampler;
+    choice_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     if (!ar_runtime_init_game(rt_, rom_path.c_str(), save_dir.c_str())) {
         const char *why = adapter_->last_error ? adapter_->last_error() : nullptr;
         return fail(std::string("init_game failed: ") + (why && *why ? why : "(no reason given)"));
@@ -106,16 +113,63 @@ bool QxSession::start(const std::string &rom_path, const std::string &save_dir, 
     // After init_game, whatever the game's settings (as VosSession); a stream that cannot start leaves the game silent.
     audio_.reset(new QxAudio(rt_));
     audio_focus_ = true;   // the stream starts playing; the first unfocused frame pauses it
+    audio_gen_ = 0;
+    apply_audio_store();
+    audio_->set_feed_choice(feed_choice(choice.resampler));
     std::string why;
-    audio_on_ = audio_->start(false, &why);
+    audio_on_ = audio_->start(audio_sources_, &why);
     if (!audio_on_) vos_log("AR_AUDIO off reason=%s", why.c_str());
     return true;
 }
 
-// Each frame, before the ticks: the session's focus pauses or resumes the stream (neither blocks), then poll() starts a
-// resumed stream once its stop settled and reopens a disconnected one.
-void QxSession::update_audio() {
-    if (!audio_ || !audio_on_) return;
+// The store's tuning, when its generation changed (VosSession::frame's block, without the spatializer).
+void QxSession::apply_audio_store() {
+    if (!audio_ || !audio_store_ || audio_store_->generation() == audio_gen_) return;
+    const AudioSettings a = audio_store_->get(&audio_gen_);
+    const ar_audio_tuning t = audio_tuning_from_settings(a);
+    audio_->set_tuning(t);
+    vos_log("AR_AUDIO tuning head_focus=%g distance_exponent=%g spotlight=%g cone=%g widen=%g sfx_db=%g music_db=%g",
+            (double)a.head_focus, (double)t.distance_exponent, (double)t.spotlight_floor_db, (double)t.spotlight_cone_deg,
+            (double)t.widen, (double)t.sfx_db, (double)t.music_db);
+}
+
+// Once a second: the resampler's mode goes to the feed live; a changed "sound" restarts the stream in the other mode
+// (stop, then start: the callback is gone in between), except into spatial in a game started in stereo.
+void QxSession::poll_audio_choice() {
+    const AudioChoice c = audio_choice_();
+    if (c.resampler != resampler_now_) {
+        resampler_now_ = c.resampler;
+        const FeedChoice fc = feed_choice(c.resampler);
+        audio_->set_feed_choice(fc);   // polyphase itself applies at the next spatial start
+        vos_log("AR_AUDIO resampler=%s", fc.mode == PolyMode::linear ? "linear" : "sinc");
+    }
+    if (c.spatial == want_spatial_) return;
+    want_spatial_ = c.spatial;
+    if (c.spatial && !audio_sources_) vos_log("AR_AUDIO spatial needs restart (the game started in stereo)");
+    const bool spatial = c.spatial && audio_sources_;
+    if (audio_on_ && audio_->spatial() == spatial) return;
+    audio_->stop();
+    std::string why;
+    audio_on_ = audio_->start(spatial, &why);
+    audio_focus_ = true;   // playing again: an unfocused session pauses it below
+    vos_log("AR_AUDIO mode=%s%s%s", spatial ? "spatial" : "stereo", audio_on_ ? "" : " off reason=", audio_on_ ? "" : why.c_str());
+}
+
+// Each frame, before the ticks: the store's tuning and (once a second) the game's choices, the head for the spatial
+// plan, then the session's focus pauses or resumes the stream (neither blocks) and poll() starts a resumed stream once
+// its stop settled and reopens a disconnected one.
+void QxSession::update_audio(const ar_render_frame &rf) {
+    if (!audio_) return;
+    apply_audio_store();
+    if (audio_choice_) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= choice_at_) {
+            choice_at_ = now + std::chrono::seconds(1);
+            poll_audio_choice();
+        }
+    }
+    if (!audio_on_) return;
+    audio_->listener(ar_pose_mul(rf.tracking_from_table, rf.head_table), rf.tracking_from_table);
     const ar_platform *api = platform_.api();
     const bool focused = api->session_state && api->session_state(api->user) == AR_SESSION_FOCUSED;
     if (focused != audio_focus_) {
@@ -176,12 +230,15 @@ void QxSession::log_perf_window() {
 uint64_t QxSession::ticks_done() const { return rt_ ? ar_runtime_ticks_done(rt_) : 0; }
 
 std::string QxSession::status() const {
-    char b[384];
-    const bool on = audio_ && audio_on_;
-    std::snprintf(b, sizeof b, "%s: tick %llu, table %s, audio=%s frames=%llu missing=%llu trimmed=%llu", adapter_->name,
-                  (unsigned long long)ticks_done(), table_valid_ ? "placed" : "not placed yet",
-                  on ? (audio_->spatial() ? "spatial" : "stereo") : "off", on ? (unsigned long long)audio_->frames_out() : 0ull,
-                  on ? (unsigned long long)audio_->missing_in() : 0ull, on ? (unsigned long long)audio_->trimmed_in() : 0ull);
+    char b[448];
+    const bool on = audio_ && audio_on_, spatial = on && audio_->spatial();
+    int n = std::snprintf(b, sizeof b, "%s: tick %llu, table %s, audio=%s frames=%llu missing=%llu trimmed=%llu", adapter_->name,
+                          (unsigned long long)ticks_done(), table_valid_ ? "placed" : "not placed yet",
+                          on ? (spatial ? "spatial" : "stereo") : "off", on ? (unsigned long long)audio_->frames_out() : 0ull,
+                          on ? (unsigned long long)audio_->missing_in() : 0ull, on ? (unsigned long long)audio_->trimmed_in() : 0ull);
+    if (spatial && n > 0 && (size_t)n < sizeof b)
+        std::snprintf(b + n, sizeof b - (size_t)n, " busy=%llu stale=%llu", (unsigned long long)audio_->feed_busy(),
+                      (unsigned long long)audio_->feed_stale());
     return b;
 }
 
@@ -328,7 +385,7 @@ bool QxSession::frame() {
     table_valid_ = rf.table_valid != 0;
     const LightingFrame lf = update_lighting(rf);       // before step_ticks: this frame's ticks already use the steering
     update_pointer(rf);
-    update_audio();
+    update_audio(rf);
     // The ticks stepped below read this frame's head but are first shown by the next frame; the view matrices always
     // use the current head.
     step_ticks();
