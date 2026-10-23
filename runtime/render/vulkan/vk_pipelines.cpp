@@ -3,38 +3,13 @@
 #include "combiner.h"
 #include "glsl_compiler.h"
 #include "glsl_emitter.h"
+#include "glsl_fixed.h"
 #include "vk_layout.h"
 namespace ar {
 namespace vkp {
 namespace {
 const size_t kMaxWarmLines = 4096;     // parse_pipeline_lines reads at most this many lines
 const size_t kMaxWarmLineBytes = 96;   // and skips longer lines unparsed
-// The resolve: a full-screen triangle; each fragment copies its source texel 1:1 (metal_device.mm kResolveMsl).
-const char *kResolveVert = R"(#version 450
-void main() {
-    const vec2 p = vec2(float((gl_VertexIndex << 1) & 2), float(gl_VertexIndex & 2));
-    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-}
-)";
-const char *kResolveFrag = R"(#version 450
-layout(set = 0, binding = 0) uniform sampler2DArray src;
-layout(set = 0, binding = 1) uniform sampler2DArray srcd;
-layout(push_constant) uniform RU { vec2 dst_origin; uvec2 src_origin; uvec2 src_last; uint linearize; uint src_layer; } u;
-layout(location = 0) out vec4 o_color;
-void main() {
-    const uvec2 sz = uvec2(textureSize(src, 0).xy);
-    const uvec2 p = min(uvec2(gl_FragCoord.xy - u.dst_origin) + u.src_origin, min(u.src_last, sz - 1u));
-    vec4 c = texelFetch(src, ivec3(p, u.src_layer), 0);
-    if (u.linearize != 0u && c.a > 0.0) {   // un-premultiply, sRGB -> linear, premultiply again
-        const vec3 g = clamp(c.rgb / c.a, 0.0, 1.0);
-        c.rgb = mix(pow((g + 0.055) / 1.055, vec3(2.4)), g / 12.92, lessThanEqual(g, vec3(0.04045))) * c.a;
-    }
-    o_color = c;
-#ifdef WRITE_DEPTH
-    gl_FragDepth = texelFetch(srcd, ivec3(p, u.src_layer), 0).r;
-#endif
-}
-)";
 // One subpass, colour attachment 0 and (n == 2) depth attachment 1. external: dependencies with the work before and after
 // the pass on the same attachments (the external image's; the targets' passes have explicit barriers instead).
 VkRenderPass make_pass(VkDevice dev, const VkAttachmentDescription *a, uint32_t n, bool external) {
@@ -105,9 +80,12 @@ VkRenderPass make_resolve_pass(VkDevice dev, VkFormat cf, VkFormat df) {
 }
 
 bool make_resolve_shaders(VkDevice dev, VkShaderModule out[3], std::string *err) {
-    std::string depth_src = kResolveFrag;
-    depth_src.insert(depth_src.find('\n') + 1, "#define WRITE_DEPTH\n");
-    const char *srcs[3] = {kResolveVert, kResolveFrag, depth_src.c_str()};
+    // The resolve: a full-screen triangle; each fragment copies its source texel 1:1 (glsl_fixed.h). The targets are 2D
+    // arrays (RESOLVE_ARRAY); the third module also writes the source depth (RESOLVE_DEPTH).
+    std::string color_src = fixed_shader("resolve.frag"), depth_src = color_src;
+    color_src.insert(color_src.find('\n') + 1, "#define RESOLVE_ARRAY 1\n");
+    depth_src.insert(depth_src.find('\n') + 1, "#define RESOLVE_ARRAY 1\n#define RESOLVE_DEPTH 1\n");
+    const std::string srcs[3] = {fixed_shader("fullscreen.vert"), color_src, depth_src};
     const GlslStage stages[3] = {GlslStage::vertex, GlslStage::fragment, GlslStage::fragment};
     for (int i = 0; i < 3; i++) {
         std::vector<uint32_t> spv;
