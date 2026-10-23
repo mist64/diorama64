@@ -142,7 +142,7 @@ extern "C" void android_main(android_app *app) {
     std::string copy_err;
     const bool copy_ok = ar::bundled_sync(app->activity->assetManager, internal + "/bundled", &copy_err, &copied);
     const double copy_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    if (!copy_ok) ar::vos_log("AR_BUNDLED failed %s", copy_err.c_str());
+    if (!copy_ok) { ar::vos_log("AR_BUNDLED failed %s", copy_err.c_str()); ar::vos_log("AR_QUEST_FAIL bundled data: %s", copy_err.c_str()); }
     else if (copied < 0) ar::vos_log("AR_BUNDLED up_to_date");
     else ar::vos_log("AR_BUNDLED copied=%d ms=%.0f", copied, copy_ms);
     // bundle_dir: the bundled data copied out of the APK; documents: the files directory (prefs.json,

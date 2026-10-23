@@ -26,6 +26,9 @@ def stage(out_assets: Path, packs: "list[str] | None", res_dir: Path = RES_DIR) 
         shutil.rmtree(out_assets)
     out_assets.mkdir(parents=True)
     expected = bundle_local.stage(out_assets / "Bundled", names=packs)
+    bad = [k for k in expected if not k.isascii()]
+    if bad:
+        raise ValueError(f"non-ASCII bundled names (the app's manifest parser reads ASCII): {bad[:3]}")
     (out_assets / "Bundled" / "bundled.json").write_text(json.dumps({"files": expected}, indent=1) + "\n")
     missing = [d for d in RES_DIRS if not (Path(res_dir) / d).is_dir()]
     if missing:

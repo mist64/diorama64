@@ -16,6 +16,27 @@ def aapt2_link_cmd(aapt2, manifest, android_jar, assets_dir, out) -> list:
     return cmd
 
 
+def missing_assets(manifest_paths: "list[str]", zip_names: "list[str]") -> "list[str]":
+    """The listed asset paths (relative to assets/) absent from the zip."""
+    have = set(zip_names)
+    return [p for p in manifest_paths if "assets/" + p not in have]
+
+
+def listed_assets(assets_dir: Path) -> "list[str]":
+    """Every path the app will open: the two manifests and the files they list (relative to assets/)."""
+    import json
+    assets_dir = Path(assets_dir)
+    out = []
+    for manifest, prefix in (("Bundled/bundled.json", "Bundled/"), ("res/res.json", "res/")):
+        f = assets_dir / manifest
+        if not f.is_file():
+            continue
+        data = json.loads(f.read_text())
+        names = data["files"] if isinstance(data, dict) else data
+        out += [manifest] + [prefix + n for n in names]
+    return out
+
+
 def collect_so(build_dir: Path) -> list:
     """Every *.so under build_dir except inside CMakeFiles/ directories.
 
@@ -49,10 +70,16 @@ def package(build_dir: Path, so_paths: list, assets_dir: "Path | None", out_apk:
     with zipfile.ZipFile(base, "a", zipfile.ZIP_DEFLATED) as z:
         for so in so_paths:
             z.write(so, f"lib/arm64-v8a/{Path(so).name}")
-        if assets_dir is not None:   # aapt2 link -A skips dotfiles (the packs' .sm64ar-verified stamps): add them here
-            for p in sorted(Path(assets_dir).rglob(".*")):
-                if p.is_file():
-                    z.write(p, "assets/" + p.relative_to(assets_dir).as_posix())
+        if assets_dir is not None:
+            # aapt2 link -A drops dotfiles (the packs' .sm64ar-verified stamps), dot- and _* directories and *~ files:
+            # whatever the manifests list that it left out is added here, then verified.
+            for rel in missing_assets(listed_assets(assets_dir), z.namelist()):
+                if (Path(assets_dir) / rel).is_file():
+                    z.write(Path(assets_dir) / rel, "assets/" + rel)
+            still = missing_assets(listed_assets(assets_dir), z.namelist())
+            if still:
+                raise SystemExit(f"quest_package: {len(still)} listed assets are not in the APK: {still[:5]}")
+            print(f"assets: all {len(listed_assets(assets_dir))} listed files are in the APK (0 missing)")
     subprocess.run([str(tools / "zipalign"), "-f", "-p", "4", str(base), str(aligned)], check=True)
     ks = _keystore(build_dir)
     subprocess.run([str(tools / "apksigner"), "sign", "--ks", str(ks), "--ks-pass", "pass:android",

@@ -54,11 +54,36 @@ void remove_tree(const std::string &path) {
     }
 }
 
-bool safe_name(const std::string &n) {
-    return !n.empty() && n[0] != '/' && n.find("..") == std::string::npos;
+bool exists(const std::string &p) { struct stat st; return lstat(p.c_str(), &st) == 0; }
+
+bool safe_name(const std::string &n) {   // relative, no ".." component
+    if (n.empty() || n[0] == '/') return false;
+    size_t i = 0;
+    while (i <= n.size()) {
+        size_t j = n.find('/', i);
+        if (j == std::string::npos) j = n.size();
+        if (n.compare(i, j - i, "..") == 0) return false;
+        i = j + 1;
+    }
+    return true;
 }
 
-bool copy_one(AAssetManager *am, const std::string &asset, const std::string &dest, std::string *err) {
+// Runs plan steps over dest; false with *err on a failed rename.
+bool run_steps(const std::vector<SwapStep> &steps, const std::string &dest, std::string *err) {
+    const std::string tmp = dest + ".tmp", old = dest + ".old";
+    for (SwapStep s : steps) {
+        switch (s) {
+            case SwapStep::restore_old: if (rename(old.c_str(), dest.c_str()) != 0) { *err = "cannot restore " + old + ": " + strerror(errno); return false; } break;
+            case SwapStep::remove_old: remove_tree(old); break;
+            case SwapStep::remove_tmp: remove_tree(tmp); break;
+            case SwapStep::dest_to_old: remove_tree(old); if (rename(dest.c_str(), old.c_str()) != 0) { *err = "cannot move " + dest + " aside: " + strerror(errno); return false; } break;
+            case SwapStep::tmp_to_dest: if (rename(tmp.c_str(), dest.c_str()) != 0) { *err = "cannot rename " + tmp + " to " + dest + ": " + strerror(errno); return false; } break;
+        }
+    }
+    return true;
+}
+
+bool copy_one(AAssetManager *am, const std::string &asset, const std::string &dest, std::vector<char> &buf, std::string *err) {
     AAsset *a = AAssetManager_open(am, asset.c_str(), AASSET_MODE_STREAMING);
     if (!a) { *err = "asset missing: " + asset; return false; }
     const size_t slash = dest.rfind('/');
@@ -69,7 +94,6 @@ bool copy_one(AAssetManager *am, const std::string &asset, const std::string &de
     }
     FILE *f = fopen(dest.c_str(), "wb");
     if (!f) { AAsset_close(a); *err = "cannot write " + dest + ": " + strerror(errno); return false; }
-    std::vector<char> buf(1 << 18);
     int n;
     bool ok = true;
     while ((n = AAsset_read(a, buf.data(), buf.size())) > 0)
@@ -89,29 +113,28 @@ bool bundled_copy(AAssetManager *am, const std::string &dest_dir, std::string *e
     const std::string tmp = dest_dir + ".tmp";
     remove_tree(tmp);   // a copy interrupted last time
     int count = 0;
+    std::vector<char> buf(1 << 18);
     for (const char *manifest : kManifests) {
         std::string json;
         if (!read_asset(am, manifest, &json)) { *err = std::string("asset missing: ") + manifest; remove_tree(tmp); return false; }
         const std::string prefix = std::string(manifest).substr(0, std::string(manifest).find('/') + 1);   // "Bundled/" | "res/"
         for (const std::string &rel : bundled_manifest_files(json)) {
             if (!safe_name(rel)) { *err = "bad name in " + std::string(manifest) + ": " + rel; remove_tree(tmp); return false; }
-            if (!copy_one(am, prefix + rel, tmp + "/" + prefix + rel, err)) { remove_tree(tmp); return false; }
+            if (!copy_one(am, prefix + rel, tmp + "/" + prefix + rel, buf, err)) { remove_tree(tmp); return false; }
             count++;
         }
-        if (!copy_one(am, manifest, tmp + "/" + manifest, err)) { remove_tree(tmp); return false; }   // last: the marker of a whole copy
+        if (!copy_one(am, manifest, tmp + "/" + manifest, buf, err)) { remove_tree(tmp); return false; }   // last: the marker of a whole copy
     }
-    remove_tree(dest_dir);
-    if (rename(tmp.c_str(), dest_dir.c_str()) != 0) {
-        *err = "cannot rename " + tmp + " to " + dest_dir + ": " + strerror(errno);
-        return false;
-    }
+    if (!run_steps(bundled_swap_plan(exists(dest_dir)), dest_dir, err)) return false;
     if (copied) *copied = count;
     return true;
 }
 
 bool bundled_sync(AAssetManager *am, const std::string &dest_dir, std::string *err, int *copied) {
-    bool needed = false;
+    std::string rerr;
+    bool needed = !run_steps(bundled_recover_plan(exists(dest_dir), exists(dest_dir + ".tmp"), exists(dest_dir + ".old")), dest_dir, &rerr);
     for (const char *manifest : kManifests) {
+        if (needed) break;
         std::string json;
         if (!read_asset(am, manifest, &json)) { needed = true; break; }   // bundled_copy reports the missing asset
         if (bundled_copy_needed(json, dest_dir + "/" + manifest)) { needed = true; break; }

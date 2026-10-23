@@ -28,6 +28,11 @@ class QuestScriptTests(unittest.TestCase):
     def test_aapt2_link_cmd_no_assets(self):
         self.assertNotIn("-A", aapt2_link_cmd("a", "m", "j", None, "o"))
 
+    def test_missing_assets(self):
+        from quest_package import missing_assets
+        self.assertEqual(missing_assets(["a/.x", "b", "c/_d/e"], ["assets/b", "assets/c/_d/f"]), ["a/.x", "c/_d/e"])
+        self.assertEqual(missing_assets([], []), [])
+
     def test_quest_bundle_assets_layout(self):
         import json, tempfile
         from unittest import mock

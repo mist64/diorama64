@@ -75,4 +75,20 @@ bool bundled_copy_needed(const std::string &asset_manifest_json, const std::stri
     return have != asset_manifest_json;
 }
 
+std::vector<SwapStep> bundled_recover_plan(bool dest_exists, bool tmp_exists, bool old_exists) {
+    std::vector<SwapStep> steps;
+    if (!dest_exists && old_exists) { steps.push_back(SwapStep::restore_old); old_exists = false; }
+    if (old_exists) steps.push_back(SwapStep::remove_old);
+    if (tmp_exists) steps.push_back(SwapStep::remove_tmp);
+    return steps;
+}
+
+std::vector<SwapStep> bundled_swap_plan(bool dest_exists) {
+    std::vector<SwapStep> steps;
+    if (dest_exists) steps.push_back(SwapStep::dest_to_old);
+    steps.push_back(SwapStep::tmp_to_dest);
+    if (dest_exists) steps.push_back(SwapStep::remove_old);
+    return steps;
+}
+
 }  // namespace ar

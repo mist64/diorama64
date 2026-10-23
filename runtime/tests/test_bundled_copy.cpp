@@ -30,6 +30,14 @@ int main() {
     CHECK(ar::bundled_copy_needed(m + " ", path));                 // differs
     CHECK(ar::bundled_copy_needed(R"({"files": {"rom.z64": "zz"}})", path));
     std::remove(path.c_str());
+    using ar::SwapStep;
+    using V = std::vector<SwapStep>;
+    CHECK(ar::bundled_recover_plan(true, false, false).empty());
+    CHECK(ar::bundled_recover_plan(true, true, true) == (V{SwapStep::remove_old, SwapStep::remove_tmp}));
+    CHECK(ar::bundled_recover_plan(false, true, true) == (V{SwapStep::restore_old, SwapStep::remove_tmp}));   // killed between the renames
+    CHECK(ar::bundled_recover_plan(false, false, false).empty());
+    CHECK(ar::bundled_swap_plan(true) == (V{SwapStep::dest_to_old, SwapStep::tmp_to_dest, SwapStep::remove_old}));
+    CHECK(ar::bundled_swap_plan(false) == (V{SwapStep::tmp_to_dest}));
     printf("ok\n");
     return 0;
 }
