@@ -241,7 +241,8 @@ std::vector<Control> audio_tab(const Bridge &b) {
         const bool stereo = r.get("sm64.sound") == "stereo";
         const std::string st = r.get("sm64.audio_state");   // -1 not decided yet, 0 stereo only, 1 spatial
         r.heading("Sound");
-        r.seg("sm64.sound", "Sound", {"spatial", "stereo"}, {"Spatial", "Stereo"});
+        Control &snd = r.seg("sm64.sound", "Sound", {"spatial", "stereo"}, {"Spatial", "Stereo"});
+        if (!stereo && st == "0") snd.note = "stereo only on this run";   // SM64SoundRows' caption: no spatial audio
         r.seg("sm64.audio", "Game sound", {"on", "off"}, {"On", "Off"});
         r.seg("sm64.reverb", "Game reverb", {"neutral", "original"}, {"Neutral", "Original"}).enabled = !(stereo || st == "0");
         r.seg("sm64.event_music", "Event music", {"ring", "bed"}, {"Around the table", "With the game's mix"}).enabled =
@@ -269,7 +270,7 @@ std::vector<Control> audio_tab(const Bridge &b) {
     r.slider("audio.ring_focus", "Ring focus", 0.f, 1.f, 0.05f).enabled = ring;
     r.seg("audio.spatializer", "Spatial audio", {"binaural", "automatic", "channel"}, {"Binaural", "Automatic", "Channel"}).note =
         "binaural: panning on this headset";
-    r.toggle("audio.show_sources", "Show sound sources");
+    r.toggle("audio.show_sources", "Show sound sources").note = "no effect on this headset";
     return r.out;
 }
 

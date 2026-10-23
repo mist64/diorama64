@@ -4,7 +4,9 @@
   <out>/Bundled/rom.z64, Bundled/packs/<name>/...   bundle_local.stage (ROM checked, packs re-verified and stamped)
   <out>/Bundled/bundled.json                        {"files": {"rom.z64": "<sha256>", "packs/<name>/<file>": ...}}
   <out>/res/{lang,dynos,palettes,mods}/...          the game's resources (sm64_oracle.py's build/_src/.../us_pc)
-  <out>/res/res.json                                ["lang/English.ini", ...] (assets cannot be listed recursively)
+  <out>/res/res.json                                {"files": {"lang/English.ini": "<sha256>", ...}} (assets cannot
+                                                    be listed recursively; the hashes make a changed resource file,
+                                                    e.g. after an sm64 rebuild, change the manifest and so recopy)
 
 The app copies them to its private files directory on first launch and whenever the manifests change.
 """
@@ -33,11 +35,11 @@ def stage(out_assets: Path, packs: "list[str] | None", res_dir: Path = RES_DIR) 
     missing = [d for d in RES_DIRS if not (Path(res_dir) / d).is_dir()]
     if missing:
         raise ValueError(f"{res_dir}: missing {', '.join(missing)} (python3 scripts/sm64_oracle.py)")
-    files = []
+    files = {}
     for d in RES_DIRS:
         shutil.copytree(Path(res_dir) / d, out_assets / "res" / d)
     for p in sorted((out_assets / "res").rglob("*")):
         if p.is_file() and not bundle_local.finder_junk(p):
-            files.append(p.relative_to(out_assets / "res").as_posix())
-    (out_assets / "res" / "res.json").write_text(json.dumps(files, indent=1) + "\n")
+            files[p.relative_to(out_assets / "res").as_posix()] = bundle_local.sha256(p)
+    (out_assets / "res" / "res.json").write_text(json.dumps({"files": files}, indent=1) + "\n")
     return expected

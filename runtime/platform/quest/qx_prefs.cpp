@@ -255,6 +255,14 @@ std::vector<PrefLoadResult> qx_load_values(QxPrefs &p, const std::string &prefix
     return out;
 }
 
+bool qx_seed_value(QxPrefs &p, const std::string &prefix, const std::string &key, const std::string &value, int current_rev) {
+    const std::string full = prefix + key;
+    if (p.has(full)) return false;
+    if (!p.has(prefix + "defaults_rev") && !p.has(prefix + "defaults_version")) p.set_int(prefix + "defaults_rev", current_rev);
+    p.set(full, value);
+    return true;
+}
+
 void qx_migrate_audio_defaults(QxPrefs &p) {
     static const struct {
         int version;

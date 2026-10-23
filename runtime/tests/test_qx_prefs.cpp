@@ -158,6 +158,34 @@ static void test_drop_stored() {
     CHECK(!q.has("look.defaults_rev"));
 }
 
+// arvos_quest_seed_look's sequence on a fresh store: the seed, then load_look's qx_load_values with the Look rule
+// (look_drop_stored: shadows "objects" was superseded at revision 1; look_defaults_rev() is 2).
+static void test_seed_survives_defaults_rule() {
+    auto drop = [](const std::string &k, const std::string &s, int rev, bool has_launch) {
+        return !has_launch && 1 > rev && k == "shadows" && s == "objects";
+    };
+    auto launch = [](const std::string &, std::string *) { return false; };
+    QxPrefs p(tmp_path("seed"));
+    CHECK(qx_seed_value(p, "look.", "shadows", "objects", 2));
+    CHECK(p.get_int("look.defaults_rev", -1) == 2);
+    auto r = qx_load_values(p, "look.", keys(), def_of, 2, drop, launch);
+    CHECK(r[0].key == "shadows" && r[0].value == "objects");
+    CHECK(p.get("look.shadows") == "objects");
+    CHECK(!qx_seed_value(p, "look.", "shadows", "full", 2));   // stored: the player's value stays
+    CHECK(p.get("look.shadows") == "objects");
+    // Without the revision (the old seed) the same value is dropped: the bug this guards against.
+    QxPrefs q(tmp_path("seed_old"));
+    q.set("look.shadows", "objects");
+    r = qx_load_values(q, "look.", keys(), def_of, 2, drop, launch);
+    CHECK(r[0].value == "full" && !q.has("look.shadows"));
+    // A store already loaded at an older revision keeps it, so the rule still applies to the player's older values.
+    QxPrefs o(tmp_path("seed_rev0"));
+    o.set_int("look.defaults_version", 0);
+    o.set("look.msaa", "1");
+    CHECK(qx_seed_value(o, "look.", "shadows", "objects", 2));
+    CHECK(!o.has("look.defaults_rev"));
+}
+
 static void test_launch_value() {
     std::string path = tmp_path("launch");
     QxPrefs p(path);
@@ -212,6 +240,7 @@ int main() {
     test_save_failure_keeps_original();
     test_escapes();
     test_drop_stored();
+    test_seed_survives_defaults_rule();
     test_launch_value();
     test_audio_migration();
     printf("PASS\n");

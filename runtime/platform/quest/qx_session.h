@@ -53,9 +53,9 @@ public:
     // (spatializer and show_sources have no use on the Quest).
     void set_audio_store(const AudioStore *store) { audio_store_ = store; }
     // The game's audio choices (sm64's "sound" and "resampler" settings), read before init_game and then once a second;
-    // unset (any other game): stereo. spatial at start puts the runtime in SOURCES mode, which cannot change after
-    // init_game: a later switch to spatial in a game started in stereo is logged (AR_AUDIO spatial needs restart) and
-    // stays stereo; any other switch restarts the stream in the other mode.
+    // unset (any other game): stereo. The runtime is put in SOURCES mode before init_game whenever the adapter accepts
+    // it, whatever "sound" says; the stream is spatial when "sound" is spatial and SOURCES was accepted, and a live
+    // "sound" change restarts it in the other mode, both ways. A failed stream start is retried once a second.
     struct AudioChoice { bool spatial = false; int resampler = 0; };   // resampler: feed_choice's index
     void set_audio_choice(std::function<AudioChoice()> fn) { audio_choice_ = std::move(fn); }
     void set_world_clip(bool floor, bool box) { wclip_floor_ = floor; wclip_box_ = box; }
@@ -70,7 +70,8 @@ public:
     void set_perf_window_callback(void (*fn)(void *ctx), void *ctx) { perf_window_fn_ = fn; perf_window_ctx_ = ctx; }
     // Before start; the box outlives the session. The room light's status after every frame (arvos_room_light_get).
     void set_room_light_status(RoomLightStatusBox *box) { light_box_ = box; }
-    // The game audio runs in spatial mode (SOURCES with the stream up); any thread (vos_session.h's audio_spatial).
+    // Spatial audio is available (the runtime is in SOURCES mode), as vos_session.h's audio_spatial (PHASE started):
+    // arvos_sm64_audio_state shows 0 (stereo only) when it is not. Any thread.
     bool audio_spatial() const { return spatial_ok_.load(std::memory_order_acquire); }
     bool panel_open() const { return panel_.open; }   // toggled by the left menu button
     // The settings panel's calls into the app (arvos_* behind std::functions); before the first frame. The panel's tab
@@ -103,6 +104,7 @@ private:
     void update_audio(const ar_render_frame &rf);
     void apply_audio_store();
     void poll_audio_choice();
+    bool start_audio();
 
     const ar_adapter *adapter_;
     QxPlatform &platform_;
@@ -168,6 +170,8 @@ private:
     std::function<AudioChoice()> audio_choice_;
     bool audio_sources_ = false;   // the runtime was put in SOURCES mode before init_game
     bool want_spatial_ = false;    // the game's last "sound" choice
+    int audio_failures_ = 0;       // failed stream starts since the last success
+    std::chrono::steady_clock::time_point audio_retry_at_{}, audio_fail_log_at_{};
     int resampler_now_ = -1;
     std::chrono::steady_clock::time_point choice_at_{};
     RoomLightStatusBox *light_box_ = nullptr;

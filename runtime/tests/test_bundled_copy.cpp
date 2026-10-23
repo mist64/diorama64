@@ -16,6 +16,8 @@ int main() {
 
     const std::vector<std::string> r = ar::bundled_manifest_files(R"(["lang/English.ini", "mods/a b.lua"])");   // res.json
     CHECK(r.size() == 2 && r[0] == "lang/English.ini" && r[1] == "mods/a b.lua");
+    const std::vector<std::string> r2 = ar::bundled_manifest_files(R"({"files": {"lang/English.ini": "ab", "mods/a b.lua": "cd"}})");
+    CHECK(r2 == r);   // res.json as quest_bundle.py writes it now: {"files": {name: sha256}}
     CHECK(ar::bundled_manifest_files("").empty());
     CHECK(ar::bundled_manifest_files("{}").empty());
 

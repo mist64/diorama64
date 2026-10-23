@@ -161,6 +161,12 @@ static void enable_rules() {
     tabs = build_tabs(f.bridge());
     CHECK(find(tabs, "look.foveation")->note == "no effect on this headset");
     CHECK(find(tabs, "audio.spatializer")->note == "binaural: panning on this headset");
+    CHECK(find(tabs, "audio.show_sources")->note == "no effect on this headset");
+    CHECK(find(tabs, "sm64.sound")->note.empty());
+    f.v["sm64.audio_state"] = "0";   // the adapter refused SOURCES: spatial is unavailable
+    CHECK(find(build_tabs(f.bridge()), "sm64.sound")->note == "stereo only on this run");
+    f.v["sm64.sound"] = "stereo";
+    CHECK(find(build_tabs(f.bridge()), "sm64.sound")->note.empty());
 }
 
 static void ranges() {

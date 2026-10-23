@@ -136,11 +136,22 @@ extern "C" void android_main(android_app *app) {
     qx_app_set_android(app);
     qx_app_set_pump(pump_now, app);
     // The ROM, packs and resources ship as APK assets; copy them to internalDataPath/bundled on the first launch and
-    // whenever the APK's manifests change (atomic: written to bundled.tmp, renamed into place).
+    // whenever the APK's manifests change (atomic: written to bundled.tmp, renamed into place). The looper is pumped
+    // (non-blocking) during the copy: the glue's onStart / onResume wait for android_main to take their commands, and a
+    // first copy of a few hundred MB would otherwise stall the main thread into an ANR. on_cmd only logs until the
+    // bridge sets userData.
     const auto t0 = std::chrono::steady_clock::now();
+    auto logged_at = t0;
     int copied = 0;
     std::string copy_err;
-    const bool copy_ok = ar::bundled_sync(app->activity->assetManager, internal + "/bundled", &copy_err, &copied);
+    const bool copy_ok = ar::bundled_sync(app->activity->assetManager, internal + "/bundled", &copy_err, &copied,
+        [app, &logged_at](int files) {
+            pump(app, 0);
+            const auto now = std::chrono::steady_clock::now();
+            if (now - logged_at < std::chrono::seconds(1)) return;
+            logged_at = now;
+            ar::vos_log("AR_BUNDLED progress files=%d", files);
+        });
     const double copy_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (!copy_ok) { ar::vos_log("AR_BUNDLED failed %s", copy_err.c_str()); ar::vos_log("AR_QUEST_FAIL bundled data: %s", copy_err.c_str()); }
     else if (copied < 0) ar::vos_log("AR_BUNDLED up_to_date");

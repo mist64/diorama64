@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <functional>
 #include <atomic>
@@ -722,14 +723,17 @@ extern "C" int arvos_quest_hint(char *buf, int cap) {
     if (buf && cap > 0) copy_out(h, buf, cap);
     return h.empty() ? 0 : 1;
 }
-extern "C" int arvos_quest_seed_look(const char *key, const char *value) {
+// A first-run value under prefix ("look." or "sm64."), stamped with that prefix's current defaults revision when the
+// store has none yet, so load_values' superseded-defaults rule does not drop it (qx_seed_value).
+static int seed_value(const std::string &prefix, const char *key, const char *value) {
     if (!key || !value || !qxapp::prefs()) return 0;
-    const std::string k = std::string("look.") + key;
-    if (pref_has(k)) return 0;
-    pref_set(k, value);
-    ar::vos_log("AR_SETTING look.%s seeded=%s (first run on this headset)", key, value);
+    const int rev = prefix == "sm64." ? arvos_sm64_settings_revision() : ar::look_defaults_rev();
+    if (!ar::qx_seed_value(*qxapp::prefs(), prefix, key, value, rev)) return 0;
+    pref_set(prefix + key, value);   // already stored: marks the store dirty
+    ar::vos_log("AR_SETTING %s%s seeded=%s (first run on this headset)", prefix.c_str(), key, value);
     return 1;
 }
+extern "C" int arvos_quest_seed_look(const char *key, const char *value) { return seed_value("look.", key, value); }
 extern "C" void arvos_quest_request_scan(void) {
     ar::vos_log("AR_UI scan room");
     if (ar::QxPlatform *p = state().live.load()) p->request_scene_capture();
@@ -777,14 +781,14 @@ static void poll_packs() {   // PacksModel.startPolling's refresh
 // Empty until the performance pass measures a need: the decision rule is in
 // docs/superpowers/plans/2026-10-22-quest-device-checklist.md (Plan 3, Task 8) and the numbers in
 // docs/superpowers/plans/2026-10-22-quest-perf.md. Entries are {look key, value}, e.g. {"msaa", "2"}.
-static const std::pair<const char *, const char *> kQuestLookSeed[] = {};
+static constexpr std::array<std::pair<const char *, const char *>, 0> kQuestLookSeed{};
 
 extern "C" int qx_app_startup(void) {
     AppState &s = state();
     if (!s.options_ok) { ar::vos_log("AR_ERROR startup skipped: %s", s.error.c_str()); return 0; }
     if (!qxapp::prefs()) qxapp::prefs_open(s.docs + "/prefs.json");   // normally opened by arvos_configure
     // Between arvos_configure and the loads below, so a seeded key is read by load_look like a stored one.
-    if (sizeof kQuestLookSeed == 0) ar::vos_log("AR_LOOK seed none");
+    if (kQuestLookSeed.empty()) ar::vos_log("AR_LOOK seed none");
     for (const auto &kv : kQuestLookSeed)
         if (arvos_quest_seed_look(kv.first, kv.second)) ar::vos_log("AR_LOOK seed %s=%s", kv.first, kv.second);
     // ShellModel.loadGame has nothing to load here (arvos_game, arvos_has_draw_all_rooms are read by the panel).

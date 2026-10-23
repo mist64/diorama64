@@ -118,10 +118,13 @@ bool QxSession::start(const std::string &rom_path, const std::string &save_dir, 
     ar_runtime_set_texture_sink(rt_, upload, dev_.get());
     if (!save_dir.empty() && ::mkdir(save_dir.c_str(), 0700) != 0 && errno != EEXIST)
         vos_log("AR_QUEST save folder %s: mkdir failed (errno %d)", save_dir.c_str(), errno);
-    // The audio mode is fixed at init_game: SOURCES when the game asks for spatial sound and the adapter has lanes.
+    // The audio mode is fixed at init_game: SOURCES whenever the adapter has lanes, whatever "sound" says, so the switch
+    // is live both ways (the game routes effects to the lanes only in SOURCES with "sound" spatial; in stereo the
+    // stream pulls the bed alone, which then carries the whole mix).
     const AudioChoice choice = audio_choice_ ? audio_choice_() : AudioChoice{};
-    audio_sources_ = choice.spatial && ar_runtime_set_audio_mode(rt_, AR_AUDIO_MODE_SOURCES) != 0;
-    if (choice.spatial && !audio_sources_) vos_log("AR_AUDIO spatial refused: the adapter is stereo only");
+    audio_sources_ = ar_runtime_set_audio_mode(rt_, AR_AUDIO_MODE_SOURCES) != 0;
+    if (!audio_sources_) vos_log("AR_AUDIO spatial unavailable: the adapter refused SOURCES (stereo only)");
+    spatial_ok_.store(audio_sources_, std::memory_order_release);   // before the boot publishes the game's state
     want_spatial_ = choice.spatial;
     resampler_now_ = choice.resampler;
     choice_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
@@ -137,10 +140,33 @@ bool QxSession::start(const std::string &rom_path, const std::string &save_dir, 
     audio_gen_ = 0;
     apply_audio_store();
     audio_->set_feed_choice(feed_choice(choice.resampler));
-    std::string why;
-    audio_on_ = audio_->start(audio_sources_, &why);
-    if (!audio_on_) vos_log("AR_AUDIO off reason=%s", why.c_str());
+    audio_failures_ = 0;
+    start_audio();
     return true;
+}
+
+// Starts the stream in the mode "sound" asks for (spatial only with SOURCES). A failed start is retried once a second
+// from update_audio; the first failure is logged and then one line every 10 s until a start succeeds.
+bool QxSession::start_audio() {
+    const bool spatial = want_spatial_ && audio_sources_;
+    std::string why;
+    audio_on_ = audio_->start(spatial, &why);
+    audio_focus_ = true;   // playing again: an unfocused session pauses it in update_audio
+    const auto now = std::chrono::steady_clock::now();
+    if (audio_on_) {
+        if (audio_failures_ > 0) vos_log("AR_AUDIO mode=%s recovered after %d failed starts", spatial ? "spatial" : "stereo", audio_failures_);
+        else vos_log("AR_AUDIO mode=%s", spatial ? "spatial" : "stereo");
+        audio_failures_ = 0;
+        return true;
+    }
+    if (audio_failures_ == 0 || now >= audio_fail_log_at_) {
+        vos_log("AR_AUDIO off mode=%s reason=%s failures=%d (retrying once a second)", spatial ? "spatial" : "stereo",
+                why.c_str(), audio_failures_ + 1);
+        audio_fail_log_at_ = now + std::chrono::seconds(10);
+    }
+    audio_failures_++;
+    audio_retry_at_ = now + std::chrono::seconds(1);
+    return false;
 }
 
 // The store's tuning, when its generation changed (VosSession::frame's block, without the spatializer).
@@ -155,7 +181,7 @@ void QxSession::apply_audio_store() {
 }
 
 // Once a second: the resampler's mode goes to the feed live; a changed "sound" restarts the stream in the other mode
-// (stop, then start: the callback is gone in between), except into spatial in a game started in stereo.
+// (stop, then start: the callback is gone in between), both ways; without SOURCES the stream stays stereo.
 void QxSession::poll_audio_choice() {
     const AudioChoice c = audio_choice_();
     if (c.resampler != resampler_now_) {
@@ -166,14 +192,11 @@ void QxSession::poll_audio_choice() {
     }
     if (c.spatial == want_spatial_) return;
     want_spatial_ = c.spatial;
-    if (c.spatial && !audio_sources_) vos_log("AR_AUDIO spatial needs restart (the game started in stereo)");
+    if (c.spatial && !audio_sources_) vos_log("AR_AUDIO sound=spatial stays stereo (the adapter refused SOURCES)");
     const bool spatial = c.spatial && audio_sources_;
     if (audio_on_ && audio_->spatial() == spatial) return;
-    audio_->stop();
-    std::string why;
-    audio_on_ = audio_->start(spatial, &why);
-    audio_focus_ = true;   // playing again: an unfocused session pauses it below
-    vos_log("AR_AUDIO mode=%s%s%s", spatial ? "spatial" : "stereo", audio_on_ ? "" : " off reason=", audio_on_ ? "" : why.c_str());
+    if (audio_on_) audio_->stop();
+    start_audio();   // a failure is retried from update_audio
 }
 
 // Each frame, before the ticks: the store's tuning and (once a second) the game's choices, the head for the spatial
@@ -189,7 +212,10 @@ void QxSession::update_audio(const ar_render_frame &rf) {
             poll_audio_choice();
         }
     }
-    if (!audio_on_) return;
+    if (!audio_on_) {
+        if (std::chrono::steady_clock::now() >= audio_retry_at_) start_audio();
+        if (!audio_on_) return;
+    }
     audio_->listener(ar_pose_mul(rf.tracking_from_table, rf.head_table), rf.tracking_from_table);
     const ar_platform *api = platform_.api();
     const bool focused = api->session_state && api->session_state(api->user) == AR_SESSION_FOCUSED;
@@ -534,7 +560,6 @@ void QxSession::record_perf(int64_t display_ns, std::chrono::steady_clock::time_
                 gap_ms, cpu_ms, step_ms_, k);
     const RoomLightStatus ls = light_.status();
     if (light_box_) light_box_->set(ls);
-    spatial_ok_.store(audio_ && audio_on_ && audio_->spatial(), std::memory_order_release);
     const bool flipped = (ls.room ? 1 : 0) != light_room_logged_;
     bool window = false;
     if (perf_.frames() >= 900) { log_perf_window(); window = true; }

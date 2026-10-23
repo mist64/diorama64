@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -83,7 +84,22 @@ bool run_steps(const std::vector<SwapStep> &steps, const std::string &dest, std:
     return true;
 }
 
-bool copy_one(AAssetManager *am, const std::string &asset, const std::string &dest, std::vector<char> &buf, std::string *err) {
+// bundled_copy's progress, throttled to one call per 50 ms.
+struct Ticker {
+    const BundledProgress &fn;
+    int files = 0;
+    std::chrono::steady_clock::time_point next = std::chrono::steady_clock::now();
+    void operator()() {
+        if (!fn) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next) return;
+        next = now + std::chrono::milliseconds(50);
+        fn(files);
+    }
+};
+
+bool copy_one(AAssetManager *am, const std::string &asset, const std::string &dest, std::vector<char> &buf, std::string *err,
+              Ticker &tick) {
     AAsset *a = AAssetManager_open(am, asset.c_str(), AASSET_MODE_STREAMING);
     if (!a) { *err = "asset missing: " + asset; return false; }
     const size_t slash = dest.rfind('/');
@@ -96,8 +112,10 @@ bool copy_one(AAssetManager *am, const std::string &asset, const std::string &de
     if (!f) { AAsset_close(a); *err = "cannot write " + dest + ": " + strerror(errno); return false; }
     int n;
     bool ok = true;
-    while ((n = AAsset_read(a, buf.data(), buf.size())) > 0)
+    while ((n = AAsset_read(a, buf.data(), buf.size())) > 0) {
         if (fwrite(buf.data(), 1, (size_t)n, f) != (size_t)n) { ok = false; break; }
+        tick();
+    }
     if (n < 0) ok = false;
     if (fclose(f) != 0) ok = false;
     AAsset_close(a);
@@ -107,12 +125,13 @@ bool copy_one(AAssetManager *am, const std::string &asset, const std::string &de
 
 }  // namespace
 
-bool bundled_copy(AAssetManager *am, const std::string &dest_dir, std::string *err, int *copied) {
+bool bundled_copy(AAssetManager *am, const std::string &dest_dir, std::string *err, int *copied, const BundledProgress &progress) {
     std::string e;
     if (!err) err = &e;
+    Ticker tick{progress};
     const std::string tmp = dest_dir + ".tmp";
     remove_tree(tmp);   // a copy interrupted last time
-    int count = 0;
+    int &count = tick.files;
     std::vector<char> buf(1 << 18);
     for (const char *manifest : kManifests) {
         std::string json;
@@ -120,17 +139,18 @@ bool bundled_copy(AAssetManager *am, const std::string &dest_dir, std::string *e
         const std::string prefix = std::string(manifest).substr(0, std::string(manifest).find('/') + 1);   // "Bundled/" | "res/"
         for (const std::string &rel : bundled_manifest_files(json)) {
             if (!safe_name(rel)) { *err = "bad name in " + std::string(manifest) + ": " + rel; remove_tree(tmp); return false; }
-            if (!copy_one(am, prefix + rel, tmp + "/" + prefix + rel, buf, err)) { remove_tree(tmp); return false; }
+            if (!copy_one(am, prefix + rel, tmp + "/" + prefix + rel, buf, err, tick)) { remove_tree(tmp); return false; }
             count++;
+            tick();
         }
-        if (!copy_one(am, manifest, tmp + "/" + manifest, buf, err)) { remove_tree(tmp); return false; }   // last: the marker of a whole copy
+        if (!copy_one(am, manifest, tmp + "/" + manifest, buf, err, tick)) { remove_tree(tmp); return false; }   // last: the marker of a whole copy
     }
     if (!run_steps(bundled_swap_plan(exists(dest_dir)), dest_dir, err)) return false;
     if (copied) *copied = count;
     return true;
 }
 
-bool bundled_sync(AAssetManager *am, const std::string &dest_dir, std::string *err, int *copied) {
+bool bundled_sync(AAssetManager *am, const std::string &dest_dir, std::string *err, int *copied, const BundledProgress &progress) {
     std::string rerr;
     bool needed = !run_steps(bundled_recover_plan(exists(dest_dir), exists(dest_dir + ".tmp"), exists(dest_dir + ".old")), dest_dir, &rerr);
     for (const char *manifest : kManifests) {
@@ -140,7 +160,7 @@ bool bundled_sync(AAssetManager *am, const std::string &dest_dir, std::string *e
         if (bundled_copy_needed(json, dest_dir + "/" + manifest)) { needed = true; break; }
     }
     if (!needed) { *copied = -1; return true; }
-    return bundled_copy(am, dest_dir, err, copied);
+    return bundled_copy(am, dest_dir, err, copied, progress);
 }
 
 }  // namespace ar

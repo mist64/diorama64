@@ -49,6 +49,12 @@ std::vector<PrefLoadResult> qx_load_values(QxPrefs &p, const std::string &prefix
     const std::function<bool(const std::string &, const std::string &, int, bool)> &drop_stored,
     const std::function<bool(const std::string &, std::string *)> &launch_of);
 
+// A first-run default for prefix+key, written only when the player never stored that key. A store with neither
+// prefix+"defaults_rev" nor prefix+"defaults_version" has never been loaded at all (qx_load_values sets the revision on
+// the first load), so prefix+"defaults_rev" = current_rev is set first: otherwise the next qx_load_values would read
+// revision 0 and drop a seeded value equal to a superseded old default. False (nothing written) when key was stored.
+bool qx_seed_value(QxPrefs &p, const std::string &prefix, const std::string &key, const std::string &value, int current_rev);
+
 // Port of SM64ARApp.swift:200-212 for audio: for each version above audio.defaults_version (missing = 0), removes the
 // stored values equal to that version's old defaults {1: ring_focus "1", 2: music "box"}, then sets it to 2.
 void qx_migrate_audio_defaults(QxPrefs &p);

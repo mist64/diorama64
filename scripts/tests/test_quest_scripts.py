@@ -56,11 +56,18 @@ class QuestScriptTests(unittest.TestCase):
                 expected = quest_bundle.stage(out, ["pk"], res_dir=res)
             self.assertEqual(expected, {"packs/pk/t.png": "bb", "rom.z64": "aa"})
             self.assertEqual(json.loads((out / "Bundled" / "bundled.json").read_text()), {"files": expected})
-            listed = json.loads((out / "res" / "res.json").read_text())
+            listed = json.loads((out / "res" / "res.json").read_text())["files"]
             self.assertEqual(sorted(listed), ["dynos/packs/a.bin", "lang/English.ini", "mods/m/main.lua",
                                               "palettes/p.pal"])
-            for rel in listed:
+            for rel, digest in listed.items():
                 self.assertTrue((out / "res" / rel).is_file())
+                self.assertEqual(digest, bundle_local.sha256(out / "res" / rel))
+            # A changed resource file changes the manifest, so the app's installed-manifest comparison recopies.
+            before = (out / "res" / "res.json").read_text()
+            (res / "lang" / "English.ini").write_text("changed")
+            with mock.patch.object(bundle_local, "stage", fake_stage):
+                quest_bundle.stage(out, ["pk"], res_dir=res)
+            self.assertNotEqual((out / "res" / "res.json").read_text(), before)
 
 
 if __name__ == "__main__":
