@@ -1,18 +1,57 @@
 // The Vulkan device draws the cube room-lit through the shared Renderer (draw_ar_layer) under lavapipe: the shadow and
-// underside maps, the AO bake and the contact shadow on the table.
+// underside maps, the AO bake and the contact shadow on the table. First, without a device: the Quest session's lighting
+// (qx_lighting_frame) from the default look.
 #include "check.h"
+#include <cmath>
 #include <string>
 #include <vector>
 #include "ar_layer.h"
 #include "cube_adapter.h"
 #include "fake_platform.h"
+#include "look.h"
+#include "qx_lighting.h"
 #include "renderer.h"
 #include "vk_host_context.h"
 #include "vulkan_device.h"
 
 using namespace ar;
 
+namespace {
+bool near(float a, double b) { return std::fabs(double(a) - b) < 1e-5; }
+// The Quest has no environment probe: the key light is the fixed one (source forced to fixed, even with a probe frame),
+// no reflections, the rest as the look says.
+void check_qx_lighting_frame() {
+    const double d = 3.14159265358979323846 / 180.0;
+    ar_render_frame rf{};
+    rf.display_time_ns = 1000000000;
+    rf.tracking_from_table = ar_pose_identity();
+    rf.table_valid = 1;
+    LookSettings look;   // defaults: source room, reflections on
+    CHECK(look.source == 0 && look.reflections);
+    const LightingFrame lf = qx_lighting_frame(look, rf);
+    CHECK(lf.on == true);
+    CHECK(lf.shadows == 2);
+    CHECK(lf.ao == true);
+    CHECK(lf.reflections == false);
+    CHECK(near(lf.dir[0], std::cos(55 * d) * std::sin(45 * d)));
+    CHECK(near(lf.dir[1], std::sin(55 * d)));
+    CHECK(near(lf.dir[2], std::cos(55 * d) * std::cos(45 * d)));
+    CHECK(near(lf.dir[0] * lf.dir[0] + lf.dir[1] * lf.dir[1] + lf.dir[2] * lf.dir[2], 1.0));
+    // a frame claiming an environment changes nothing (the Quest's frames never have one)
+    rf.has_environment = 1;
+    const LightingFrame le = qx_lighting_frame(look, rf);
+    for (int k = 0; k < 3; k++) CHECK(le.dir[k] == lf.dir[k]);
+    CHECK(le.reflections == false && le.env_cube == nullptr);
+    // the key follows key_az / key_el; roomlit off turns the lighting off
+    look.key_az_deg = 90.f; look.key_el_deg = 30.f; look.roomlit = false;
+    const LightingFrame l2 = qx_lighting_frame(look, rf);
+    CHECK(l2.on == false);
+    CHECK(near(l2.dir[0], std::cos(30 * d)) && near(l2.dir[1], std::sin(30 * d)) && near(l2.dir[2], 0.0));
+}
+}
+
 int main() {
+    check_qx_lighting_frame();
     VulkanDeviceInit init{}; std::string err;
     if (!vk_host_create(&init, &err)) SKIP(err.c_str());
     auto dev = create_vulkan_device(init);

@@ -83,6 +83,10 @@ if(SM64AR_HOST_TESTS OR SM64AR_QUEST)
   if(NOT ANDROID)
     target_link_libraries(ar_qx_convert PUBLIC Vulkan::Headers)
   endif()
+  # The Quest session's portable logic (host-tested): the lighting it builds from the look.
+  add_library(ar_qx_logic STATIC platform/quest/qx_lighting.cpp)
+  target_include_directories(ar_qx_logic PUBLIC platform/quest)
+  target_link_libraries(ar_qx_logic PUBLIC ar_render_common ar_core)
 
   # glslang compiles the per-combiner GLSL to SPIR-V at runtime: no optimizer (SPIRV-Tools), no HLSL, no tools.
   set(ENABLE_OPT OFF)
@@ -120,5 +124,5 @@ if(SM64AR_QUEST)
   add_library(ar_quest STATIC platform/quest/qx_platform.cpp platform/quest/qx_session.cpp)
   target_include_directories(ar_quest PUBLIC platform/quest PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
   target_compile_definitions(ar_quest PUBLIC XR_USE_PLATFORM_ANDROID XR_USE_GRAPHICS_API_VULKAN VK_USE_PLATFORM_ANDROID_KHR)
-  target_link_libraries(ar_quest PUBLIC ar_qx_convert ar_render_vulkan ar_render_common ar_core ar_vos_logic openxr_loader vulkan android log)
+  target_link_libraries(ar_quest PUBLIC ar_qx_convert ar_qx_logic ar_render_vulkan ar_render_common ar_core ar_vos_logic openxr_loader vulkan android log)
 endif()

@@ -7,6 +7,7 @@
 #include "ar_adapter_sm64.h"
 #include "ar_game_args.h"
 #include "cube_adapter.h"
+#include "look.h"
 #include "sm64_ar_setup.h"
 #include "sm64_story.h"
 #include "qx_platform.h"
@@ -36,11 +37,13 @@ void pump(android_app *app, int timeout_ms) {
     }
 }
 
-// The launch intent's extras (adb shell am start -n ... --es game sm64 --es start story --ez fixed_table true).
+// The launch intent's extras (adb shell am start -n ... --es game sm64 --es start story --ez fixed_table true
+// --es look msaa=2,shadows=0).
 struct LaunchExtras {
     std::string game = "sm64";
     std::string start = "level";
     bool fixed_table = true;
+    std::string look;   // launch look overrides: key=value,key=value (look.h's keys)
 };
 
 LaunchExtras read_extras(ANativeActivity *activity) {
@@ -73,6 +76,7 @@ LaunchExtras read_extras(ANativeActivity *activity) {
         };
         str_extra("game", &out.game);
         str_extra("start", &out.start);
+        str_extra("look", &out.look);
         if (get_bool) {
             jstring k = env->NewStringUTF("fixed_table");
             out.fixed_table = env->CallBooleanMethod(intent, get_bool, k, (jboolean)JNI_TRUE) != JNI_FALSE;
@@ -146,6 +150,28 @@ bool setup_sm64(const std::string &start, std::string *err) {
     return true;
 }
 
+// The look overrides of the launch extra "look" (key=value,key=value) into the store, each applied one logged
+// (AR_LOOK key=value) and each refused one logged with why. Until plan 3's panel the only way to change the look.
+void apply_look_overrides(const std::string &spec, ar::LookStore *store) {
+    size_t at = 0;
+    while (at <= spec.size()) {
+        size_t end = spec.find(',', at);
+        if (end == std::string::npos) end = spec.size();
+        const std::string item = spec.substr(at, end - at);
+        at = end + 1;
+        if (item.empty()) continue;
+        const size_t eq = item.find('=');
+        std::string why;
+        if (eq == std::string::npos || eq == 0) {
+            ar::vos_log("AR_LOOK refused %s: not key=value", item.c_str());
+        } else if (!store->set(item.substr(0, eq), item.substr(eq + 1), &why)) {
+            ar::vos_log("AR_LOOK refused %s: %s", item.c_str(), why.c_str());
+        } else {
+            ar::vos_log("AR_LOOK %s", item.c_str());
+        }
+    }
+}
+
 }  // namespace
 
 extern "C" void android_main(android_app *app) {
@@ -157,8 +183,10 @@ extern "C" void android_main(android_app *app) {
     ar::vos_log("AR_ADAPTERS sm64=%s abi=%u", ar_adapter_sm64()->name, ar_adapter_sm64()->abi_version);
     app->onAppCmd = on_cmd;
     const LaunchExtras extras = read_extras(app->activity);
-    ar::vos_log("AR_QUEST_INTENT game=%s start=%s fixed_table=%d", extras.game.c_str(), extras.start.c_str(),
-                extras.fixed_table ? 1 : 0);
+    ar::vos_log("AR_QUEST_INTENT game=%s start=%s fixed_table=%d look=%s", extras.game.c_str(), extras.start.c_str(),
+                extras.fixed_table ? 1 : 0, extras.look.c_str());
+    ar::LookStore look;   // outlives the session (declared before it)
+    apply_look_overrides(extras.look, &look);
 
     // Fallback: the cube, so a missing or refused game still leaves passthrough (and a log line saying why) up.
     std::string game_name = extras.game, rom;
@@ -182,6 +210,7 @@ extern "C" void android_main(android_app *app) {
     ar::QxPlatform platform(app, cfg);
     app->userData = &platform;
     ar::QxSession session(adapter, platform, internal);
+    session.set_look_store(&look);
 
     // running: the platform frame loop runs; game: the session drives it (else passthrough only, after a failed start).
     std::string err;
@@ -208,6 +237,7 @@ extern "C" void android_main(android_app *app) {
         }
         if (!more) {   // the session is exiting: finish the activity, then wait for APP_CMD_DESTROY
             ar::vos_log("AR_QUEST_STOP ticks=%llu", (unsigned long long)session.ticks_done());
+            if (game) ar::vos_log("AR_STATUS %s", session.status().c_str());
             session.stop();
             game = false;
             running = false;
