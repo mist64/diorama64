@@ -18,6 +18,7 @@ extern "C" {
 #include "ar_runtime.h"
 }
 #include "look.h"
+#include "qx_audio.h"
 #include "qx_platform.h"
 #include "render_device.h"
 #include "renderer.h"
@@ -52,6 +53,9 @@ public:
     // the panel is closed; the claim's MOVE / END / CANCEL follow whatever it returns at BEGIN (true: claimed). Before
     // start; empty (the default): no game pointer.
     void set_pointer_claim(PointerClaim claim) { claim_ = std::move(claim); }
+    // Whether the game wants sound (sm64's "audio" setting), asked at start and once a second on the render thread: the
+    // AAudio stream starts and stops with it. Before start; empty (the default): always on.
+    void set_audio_setting(std::function<bool()> fn) { audio_setting_ = std::move(fn); }
     bool panel_open() const { return panel_open_; }   // toggled by the left menu button (plan 3's panel)
     PointerOwner pointer_owner() const { return owner_; }
     LookSettings effective_look() const;
@@ -69,6 +73,8 @@ private:
     void log_perf_window();
     void record_perf(int64_t display_ns, std::chrono::steady_clock::time_point cpu_start, uint64_t ticks_before);
     void submit_empty(const ar_render_frame &rf);
+    void update_audio();
+    void start_audio();
 
     const ar_adapter *adapter_;
     QxPlatform &platform_;
@@ -104,6 +110,12 @@ private:
     uint64_t pointer_id_ = 0;
     float ray_o_[3] = {0.f, 0.f, 0.f}, ray_d_[3] = {0.f, 0.f, -1.f};   // the last valid right aim ray, tracking space
     bool panel_open_ = false;
+    // Game audio (render thread). audio_on_: the stream was started and not stopped since; audio_focus_: the last
+    // session focus applied to it (pause when leaving FOCUSED, resume on return).
+    std::unique_ptr<QxAudio> audio_;
+    std::function<bool()> audio_setting_;
+    bool audio_on_ = false, audio_wanted_ = false, audio_focus_ = true;
+    std::chrono::steady_clock::time_point audio_checked_{};
 };
 
 }
