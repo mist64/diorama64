@@ -1,6 +1,7 @@
-// The Vulkan IRenderDevice (the Quest's renderer back end), the counterpart of metal_device.mm. Plan 1 implements the
-// subset the cube needs: textures, targets, the passes, the resolve into the OpenXR swapchain, frames, read-back and the
-// combiner pipelines; the depth maps, AO, the environment reduction and composite are stubs (plan 2).
+// The Vulkan IRenderDevice (the Quest's renderer back end), the counterpart of metal_device.mm: textures and their mips,
+// targets (multisample with a depth resolve), the passes, the resolve into the OpenXR swapchain, frames, read-back, the
+// combiner pipelines with their warm-up and the pipeline cache; the depth maps, AO, the environment reduction and
+// composite are stubs (plan 2, Task 3).
 //
 // Threading: every IRenderDevice call is made on one thread (the render thread). end_frame's on_gpu_done runs on the
 // device's completion thread.
@@ -22,4 +23,8 @@ std::unique_ptr<IRenderDevice> create_vulkan_device(const VulkanDeviceInit &init
 // False when anything in the open (or last) frame could not be vouched for: begin_frame failed, a target has no images
 // after a (re)size, or an encode_resolve recorded nothing. Reset by each begin_frame. d must come from create_vulkan_device.
 bool vulkan_device_frame_ok(IRenderDevice &d);
+// For host tests: accept a depth resolve mode other than MAX (lavapipe offers SAMPLE_ZERO only), so supported_samples can
+// exceed 1 and the multisample path runs there. Call before creating multisample targets. d must come from
+// create_vulkan_device.
+void vulkan_device_accept_any_depth_resolve(IRenderDevice &d);
 }
