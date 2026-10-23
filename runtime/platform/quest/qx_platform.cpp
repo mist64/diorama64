@@ -9,6 +9,9 @@
 #include <vector>
 #include "qx_convert.h"
 #include "qx_input.h"
+#include "qx_perm.h"
+#include "qx_placer.h"
+#include "qx_scene.h"
 #include "vos_log.h"
 
 namespace ar {
@@ -17,6 +20,9 @@ namespace {
 
 const XrViewConfigurationType kViewConfig = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
 constexpr uint32_t kEyes = 2;
+const char *const kScenePermission = "com.oculus.permission.USE_SCENE";
+constexpr uint32_t kPermPollFrames = 30;        // checkSelfPermission (a JNI call) every 30 frames until granted
+constexpr uint32_t kPermDeniedFrames = 900;     // still not granted after ~10 s of focused frames since the request: denied
 
 // Extension entry points, loaded once through xrGetInstanceProcAddr in start().
 struct XrExt {
@@ -64,6 +70,8 @@ struct QxPlatform::Impl {
     bool stage = false;
     bool has_passthrough_ext = false;
     bool has_refresh_ext = false;
+    bool has_scene_ext = false;     // XR_FB_spatial_entity, _query, _storage and XR_FB_scene (capture optional)
+    bool has_capture_ext = false;
 
     QxVulkan vk{};
 
@@ -101,8 +109,23 @@ struct QxPlatform::Impl {
     QxActionState actions{}, actions_before{};
     bool actions_changed = false;
     bool input_focused = false;   // this frame's sample came from a focused session
+    PointerOwner owner = PointerOwner::none;   // the router's owner after this frame's sample
+    PointerDecision decision{PointerOwner::none, false, false, false};
 
-    Impl(android_app *a, const QxPlatform::Config &c) : app(a), cfg(c) {
+    // The room scan and the level's place on it (render thread). The scene query waits for the USE_SCENE permission.
+    QxScene scene;
+    QxPlacer placer;
+    enum class Perm { unknown, requested, granted, denied } perm = Perm::unknown;
+    uint32_t perm_frames = 0;          // frames since the last permission check
+    uint32_t perm_focused_frames = 0;  // focused frames since the request
+    bool perm_was_focused = false;     // the session was focused after the request
+    bool perm_left_focus = false;      // and then lost focus (the dialog took it)
+    bool scene_queried_once = false;   // the first query was requested
+    bool capture_pending = false;      // request_scene_capture before the permission was granted
+    XrTime last_scene_time = 0;
+    std::string hint_logged;
+
+    Impl(android_app *a, const QxPlatform::Config &c) : app(a), cfg(c), placer(c.record_path) {
         memset(&api, 0, sizeof api);
         memset(&submit, 0, sizeof submit);
         memset(&last_head, 0, sizeof last_head);
@@ -144,6 +167,8 @@ struct QxPlatform::Impl {
     void set_passthrough(bool on);
     void end_frame();
     void sample_input(XrTime t, bool locate);
+    void update_permission();
+    void update_scene(const ar_frame_info &fi);
     void destroy();
 };
 
@@ -172,7 +197,18 @@ bool QxPlatform::Impl::create_instance(std::string *err) {
     has_refresh_ext = has_ext(avail, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     if (has_passthrough_ext) want.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
     if (has_refresh_ext) want.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
-    vos_log("AR_QUEST_EXT passthrough=%d refresh=%d", has_passthrough_ext ? 1 : 0, has_refresh_ext ? 1 : 0);
+    has_scene_ext = has_ext(avail, XR_FB_SPATIAL_ENTITY_EXTENSION_NAME) && has_ext(avail, XR_FB_SPATIAL_ENTITY_QUERY_EXTENSION_NAME) &&
+                    has_ext(avail, XR_FB_SPATIAL_ENTITY_STORAGE_EXTENSION_NAME) && has_ext(avail, XR_FB_SCENE_EXTENSION_NAME);
+    has_capture_ext = has_scene_ext && has_ext(avail, XR_FB_SCENE_CAPTURE_EXTENSION_NAME);
+    if (has_scene_ext) {
+        want.push_back(XR_FB_SPATIAL_ENTITY_EXTENSION_NAME);
+        want.push_back(XR_FB_SPATIAL_ENTITY_QUERY_EXTENSION_NAME);
+        want.push_back(XR_FB_SPATIAL_ENTITY_STORAGE_EXTENSION_NAME);
+        want.push_back(XR_FB_SCENE_EXTENSION_NAME);
+    }
+    if (has_capture_ext) want.push_back(XR_FB_SCENE_CAPTURE_EXTENSION_NAME);
+    vos_log("AR_QUEST_EXT passthrough=%d refresh=%d scene=%d capture=%d", has_passthrough_ext ? 1 : 0, has_refresh_ext ? 1 : 0,
+            has_scene_ext ? 1 : 0, has_capture_ext ? 1 : 0);
 
     XrInstanceCreateInfoAndroidKHR ai{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     ai.applicationVM = app->activity->vm;
@@ -342,6 +378,10 @@ bool QxPlatform::Impl::create_session(std::string *err) {
     std::string input_err;
     if (input.create(instance, session, &input_err)) input.attach();
     else vos_log("AR_INPUT profile=touch attached=0 (%s)", input_err.c_str());
+    // No scene is not fatal either: the level just has no table (the hint says so) unless fixed_table is set.
+    std::string scene_err;
+    if (!has_scene_ext) vos_log("AR_QUEST_SCENE unavailable: runtime lacks the scene extensions");
+    else if (!scene.start(instance, session, &scene_err)) vos_log("AR_QUEST_SCENE unavailable: %s", scene_err.c_str());
     return true;
 }
 
@@ -474,7 +514,9 @@ void QxPlatform::Impl::poll_events() {
             }
             break;
         }
-        default: break;
+        default:
+            scene.handle_event(ev);   // the Scene API's query / status / capture events (each offered once)
+            break;
         }
     }
 }
@@ -537,11 +579,26 @@ void QxPlatform::Impl::end_frame() {
 
 // This frame's controller sample (locate: the session is running and xrWaitFrame gave t). xrSyncActions only while
 // focused; otherwise no input. actions_changed compares everything but the aim poses and the time.
+// The first focused sample after an unfocused stretch has no edges (actions_before = actions): a button held through
+// a system-menu visit begins no pointer or drag and toggles no panel. Then the pointer router runs on the sample (an
+// unfocused one ends whatever owned the ray); the session reads pointer_decision() and the placer gets it in
+// update_scene.
 void QxPlatform::Impl::sample_input(XrTime t, bool locate) {
+    const bool was_focused = input_focused;
     actions_before = actions;
     input_focused = locate && session_running && state == XR_SESSION_STATE_FOCUSED;
     if (input_focused) input.sync(app_space, t, &actions);
     else input.clear(t, &actions);
+    if (input_focused && !was_focused) actions_before = actions;
+    const PointerOwner prev = owner;
+    if (input_focused) decision = qx_route_pointer(prev, actions, actions_before);
+    else decision = PointerDecision{PointerOwner::none, false, prev != PointerOwner::none, false};
+    owner = decision.owner;
+    if (prev == PointerOwner::placer && owner != PointerOwner::placer) {
+        // The drag's release must not reach the game: drop whatever pad buttons are still held until released.
+        const uint32_t held = qx_pad_from_actions(actions).buttons;
+        if (held) input.hold_until_released(held);
+    }
     const QxActionState &a = actions, &b = actions_before;
     actions_changed = a.left_active != b.left_active || a.right_active != b.right_active || a.lx != b.lx || a.ly != b.ly ||
                       a.rx != b.rx || a.ry != b.ry || a.a != b.a || a.b != b.b || a.x != b.x || a.y != b.y ||
@@ -550,9 +607,62 @@ void QxPlatform::Impl::sample_input(XrTime t, bool locate) {
                       a.right_aim_valid != b.right_aim_valid;
 }
 
+// The USE_SCENE permission: requested once at start; polled until granted. Android tells a native activity nothing of
+// the answer, so a denial is inferred: the request's dialog took focus and gave it back (or ~10 s of focused frames
+// passed) and the permission is still not granted. Polling goes on after a denial (granted later in Settings: the
+// query then starts).
+void QxPlatform::Impl::update_permission() {
+    if (perm == Perm::granted) return;
+    if (perm == Perm::requested) {
+        if (state == XR_SESSION_STATE_FOCUSED) { perm_focused_frames++; perm_was_focused = true; }
+        else if (perm_was_focused) perm_left_focus = true;   // focus lost after it was had: the dialog (or a menu)
+    }
+    if (++perm_frames < kPermPollFrames) return;
+    perm_frames = 0;
+    if (qx_perm_granted(app, kScenePermission)) {
+        perm = Perm::granted;
+        vos_log("AR_QUEST_SCENE permission=granted");
+        return;
+    }
+    if (perm == Perm::requested && state == XR_SESSION_STATE_FOCUSED &&
+        (perm_left_focus || perm_focused_frames >= kPermDeniedFrames)) {
+        perm = Perm::denied;
+        vos_log("AR_QUEST_SCENE permission=denied");
+    }
+}
+
+// Once per frame after the head is known (the session running): the permission, the scene's query and anchors, then
+// the placer with the controllers and this sample's pointer decision.
+void QxPlatform::Impl::update_scene(const ar_frame_info &fi) {
+    const XrTime t = frame_state.predictedDisplayTime;
+    float dt = last_scene_time ? (float)((double)(t - last_scene_time) * 1e-9) : 0.f;
+    if (!(dt >= 0.f) || dt > 0.1f) dt = 0.f;
+    last_scene_time = t;
+    if (!cfg.fixed_table_valid) update_permission();   // the fixed debug table never asks for the scene
+    if (perm == Perm::granted && scene.started()) {
+        if (!scene_queried_once) {
+            scene_queried_once = true;
+            scene.request_query();
+        }
+        if (capture_pending) {
+            capture_pending = false;
+            scene.request_scene_capture();
+        }
+    }
+    scene.poll(app_space, t);
+    placer.set_scene_status(scene.queried() || !scene.started(), perm == Perm::denied);
+    placer.update(scene.tables(), scene.floor_known(), scene.floor_y(), fi.tracking_from_head, actions, actions_before, decision, dt);
+    const std::string h = placer.hint();
+    if (h != hint_logged) {
+        hint_logged = h;
+        vos_log("AR_QUEST_SCENE hint=%s", h.empty() ? "none" : h.c_str());
+    }
+}
+
 void QxPlatform::Impl::destroy() {
     if (vk.device != VK_NULL_HANDLE) vkDeviceWaitIdle(vk.device);
     input.destroy();   // its action spaces belong to the session
+    scene.destroy();   // the anchor spaces too
     if (passthrough_layer != XR_NULL_HANDLE) ext.destroy_passthrough_layer(passthrough_layer);
     if (passthrough != XR_NULL_HANDLE) ext.destroy_passthrough(passthrough);
     passthrough_layer = XR_NULL_HANDLE;
@@ -646,6 +756,7 @@ int wait_frame(Impl *m, ar_frame_info *out) {
     }
     if (out->head_tracked) m->last_head = out->tracking_from_head;
     out->should_render = m->frame_state.shouldRender ? 1 : 0;
+    m->update_scene(*out);   // before the runtime reads get_table / get_preview for this frame
     return 1;
 }
 
@@ -678,12 +789,14 @@ void cb_end_frame(void *user, const ar_submit_info *used) {
     m->submit_valid = used->view_count == kEyes;
 }
 
+// The room scan's table (the placer), unless the fixed debug table (--ez fixed_table true) overrides it.
 int cb_get_table(void *user, ar_table *out) {
     Impl *m = static_cast<Impl *>(user);
     memset(out, 0, sizeof *out);
     if (!m->cfg.fixed_table_valid) {
-        out->tracking_from_table.quat[3] = 1.f;
-        return 0;
+        out->tracking_from_table = m->placer.tracking_from_table();
+        m->placer.half_extent(out->half_extent);
+        return m->placer.valid() ? 1 : 0;
     }
     out->tracking_from_table = m->cfg.fixed_table;
     // The fixed table is authored in floor-origin (STAGE) coordinates; LOCAL has its origin at the head.
@@ -695,6 +808,12 @@ int cb_get_pad(void *user, uint32_t player, ar_pad *out) {
     memset(out, 0, sizeof *out);   // touches no XR state: the last synced pad, under QxInput's mutex
     if (player != 0) return 0;
     return static_cast<Impl *>(user)->input.get_pad(out);
+}
+
+int cb_get_preview(void *user, ar_preview *out) {
+    Impl *m = static_cast<Impl *>(user);
+    if (m->cfg.fixed_table_valid) return 0;
+    return m->placer.preview(out) ? 1 : 0;
 }
 
 ar_session_state cb_session_state(void *user) {
@@ -720,7 +839,7 @@ QxPlatform::QxPlatform(android_app *app, const Config &c) : m_(new Impl(app, c))
     a.persist_anchor = nullptr;
     a.share_anchor = nullptr;
     a.get_environment = nullptr;
-    a.get_preview = nullptr;
+    a.get_preview = cb_get_preview;
 }
 
 QxPlatform::~QxPlatform() {
@@ -733,6 +852,14 @@ bool QxPlatform::start(std::string *err) {
         !m_->create_passthrough(err))
         return false;
     m_->request_refresh();
+    if (m_->scene.started() && !m_->cfg.fixed_table_valid) {
+        if (qx_perm_granted(m_->app, kScenePermission)) {
+            m_->perm = Impl::Perm::granted;
+            vos_log("AR_QUEST_SCENE permission=granted");
+        } else if (qx_perm_request(m_->app, kScenePermission)) {
+            m_->perm = Impl::Perm::requested;
+        }
+    }
     return true;
 }
 
@@ -770,6 +897,13 @@ const QxActionState &QxPlatform::actions_before() const { return m_->actions_bef
 bool QxPlatform::actions_changed() const { return m_->actions_changed; }
 bool QxPlatform::input_focused() const { return m_->input_focused; }
 void QxPlatform::hold_until_released(uint32_t mask) { m_->input.hold_until_released(mask); }
+const PointerDecision &QxPlatform::pointer_decision() const { return m_->decision; }
+void QxPlatform::replace_table() { m_->placer.replace(); }
+void QxPlatform::request_scene_capture() {
+    if (m_->perm == Impl::Perm::granted && m_->scene.started()) m_->scene.request_scene_capture();
+    else m_->capture_pending = true;   // issued once the permission is granted
+}
+std::string QxPlatform::scene_hint() const { return m_->placer.hint(); }
 bool QxPlatform::exiting() const { return m_->exit_requested || m_->app->destroyRequested; }
 
 }  // namespace ar

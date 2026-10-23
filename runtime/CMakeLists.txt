@@ -83,10 +83,11 @@ if(SM64AR_HOST_TESTS OR SM64AR_QUEST)
   if(NOT ANDROID)
     target_link_libraries(ar_qx_convert PUBLIC Vulkan::Headers)
   endif()
-  # The Quest session's portable logic (host-tested): the lighting it builds from the look, the Touch pad and pointer router.
-  add_library(ar_qx_logic STATIC platform/quest/qx_lighting.cpp platform/quest/qx_input_pure.cpp)
+  # The Quest session's portable logic (host-tested): the lighting it builds from the look, the Touch pad and pointer router,
+  # the room-scan table and the placement on it.
+  add_library(ar_qx_logic STATIC platform/quest/qx_lighting.cpp platform/quest/qx_input_pure.cpp platform/quest/qx_scene_pure.cpp)
   target_include_directories(ar_qx_logic PUBLIC platform/quest)
-  target_link_libraries(ar_qx_logic PUBLIC ar_render_common ar_core)
+  target_link_libraries(ar_qx_logic PUBLIC ar_render_common ar_core ar_vos_logic ar_qx_convert)
 
   # glslang compiles the per-combiner GLSL to SPIR-V at runtime: no optimizer (SPIRV-Tools), no HLSL, no tools.
   set(ENABLE_OPT OFF)
@@ -121,7 +122,8 @@ if(SM64AR_QUEST)
   set(BUILD_TESTS OFF)
   set(BUILD_CONFORMANCE_TESTS OFF)
   add_subdirectory(${SM64AR_OPENXR_DIR} ${CMAKE_BINARY_DIR}/openxr)
-  add_library(ar_quest STATIC platform/quest/qx_platform.cpp platform/quest/qx_session.cpp platform/quest/qx_input.cpp)
+  add_library(ar_quest STATIC platform/quest/qx_platform.cpp platform/quest/qx_session.cpp platform/quest/qx_input.cpp
+              platform/quest/qx_scene.cpp platform/quest/qx_placer.cpp platform/quest/qx_perm.cpp)
   target_include_directories(ar_quest PUBLIC platform/quest PRIVATE ${ANDROID_NDK}/sources/android/native_app_glue)
   target_compile_definitions(ar_quest PUBLIC XR_USE_PLATFORM_ANDROID XR_USE_GRAPHICS_API_VULKAN VK_USE_PLATFORM_ANDROID_KHR)
   target_link_libraries(ar_quest PUBLIC ar_qx_convert ar_qx_logic ar_render_vulkan ar_render_common ar_core ar_vos_logic openxr_loader vulkan android log)

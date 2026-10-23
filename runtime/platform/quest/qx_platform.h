@@ -21,7 +21,10 @@ using QxSwapchainImage = VulkanExternalImage;  // what ExternalView::color point
 // XR_FB_passthrough layer under it. All members are for the render thread except api()->get_pad (any thread).
 class QxPlatform {
 public:
-    struct Config { bool passthrough = true; float refresh_hz = 90.f; ar_pose fixed_table; bool fixed_table_valid = false; };
+    // fixed_table_valid: the fixed debug table replaces the room scan's (no scene permission asked, no preview).
+    // record_path: the remembered placement (files_dir/placement.json).
+    struct Config { bool passthrough = true; float refresh_hz = 90.f; ar_pose fixed_table; bool fixed_table_valid = false;
+                    std::string record_path; };
     QxPlatform(android_app *app, const Config &c);
     ~QxPlatform();
     QxPlatform(const QxPlatform &) = delete;
@@ -45,6 +48,15 @@ public:
     bool actions_changed() const;
     bool input_focused() const;               // the last sample came from a focused session (xrSyncActions ran)
     void hold_until_released(uint32_t mask);  // the pad drops these buttons until they are released (any thread)
+    // The pointer router's decision for the last sample (computed once per wait_frame, here, so the placer and the
+    // session see the same one; an unfocused sample ends whatever owned the ray). Render thread.
+    const PointerDecision &pointer_decision() const;
+    // The room scan's table (render thread). replace_table: the nearest table, offset reset (now, or once the scan has
+    // tables). request_scene_capture: Space Setup (xrRequestSceneCaptureFB), once the scene permission is granted; the
+    // scan is read again when it completes. scene_hint: "" or why the level has no table.
+    void replace_table();
+    void request_scene_capture();
+    std::string scene_hint() const;
 
     struct Impl;
 private:

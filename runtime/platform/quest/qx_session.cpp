@@ -194,11 +194,12 @@ void QxSession::update_pointer(const ar_render_frame &rf) {
     }
     if (!platform_.input_focused()) {
         cancel_game_pointer(rf);
-        owner_ = PointerOwner::none;   // the placer's drag (Task 7) ends with the focus too
+        owner_ = PointerOwner::none;   // the platform's router ended the placer's drag with the focus too
         return;
     }
+    // The platform routed this sample already (in wait_frame, so its placer acted on the same decision first).
     const PointerOwner prev = owner_;
-    const PointerDecision d = qx_route_pointer(prev, now, before);
+    const PointerDecision d = platform_.pointer_decision();
     owner_ = d.owner;
     if (prev == PointerOwner::game && d.cancel) cancel_game_pointer(rf);
     if (prev == PointerOwner::game && d.end) {

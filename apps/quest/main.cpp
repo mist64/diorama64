@@ -37,12 +37,15 @@ void pump(android_app *app, int timeout_ms) {
     }
 }
 
-// The launch intent's extras (adb shell am start -n ... --es game sm64 --es start story --ez fixed_table true
-// --es look msaa=2,shadows=0).
+// The launch intent's extras (adb shell am start -S -n ... --es game sm64 --es start story --ez fixed_table true
+// --es look msaa=2,shadows=0 --ez replace true --ez scan true). The activity is singleTask and NativeActivity reads only
+// the launch intent, so an extra applies to a fresh start (-S stops the running app first).
 struct LaunchExtras {
     std::string game = "sm64";
     std::string start = "level";
-    bool fixed_table = true;
+    bool fixed_table = false;   // debug: the fixed table instead of the room scan's
+    bool replace = false;       // "Re-place table" until plan 3's panel: the nearest table, offset reset
+    bool scan = false;          // run Space Setup (scene capture), then read the scan again
     std::string look;   // launch look overrides: key=value,key=value (look.h's keys)
 };
 
@@ -77,12 +80,17 @@ LaunchExtras read_extras(ANativeActivity *activity) {
         str_extra("game", &out.game);
         str_extra("start", &out.start);
         str_extra("look", &out.look);
-        if (get_bool) {
-            jstring k = env->NewStringUTF("fixed_table");
-            out.fixed_table = env->CallBooleanMethod(intent, get_bool, k, (jboolean)JNI_TRUE) != JNI_FALSE;
-            if (env->ExceptionCheck()) { env->ExceptionClear(); out.fixed_table = true; }
+        auto bool_extra = [&](const char *key, bool *dst) {
+            if (!get_bool) return;
+            jstring k = env->NewStringUTF(key);
+            const bool v = env->CallBooleanMethod(intent, get_bool, k, (jboolean)JNI_FALSE) != JNI_FALSE;
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            else *dst = v;
             env->DeleteLocalRef(k);
-        }
+        };
+        bool_extra("fixed_table", &out.fixed_table);
+        bool_extra("replace", &out.replace);
+        bool_extra("scan", &out.scan);
         env->DeleteLocalRef(intent_cls);
         env->DeleteLocalRef(intent);
     }
@@ -183,8 +191,8 @@ extern "C" void android_main(android_app *app) {
     ar::vos_log("AR_ADAPTERS sm64=%s abi=%u", ar_adapter_sm64()->name, ar_adapter_sm64()->abi_version);
     app->onAppCmd = on_cmd;
     const LaunchExtras extras = read_extras(app->activity);
-    ar::vos_log("AR_QUEST_INTENT game=%s start=%s fixed_table=%d look=%s", extras.game.c_str(), extras.start.c_str(),
-                extras.fixed_table ? 1 : 0, extras.look.c_str());
+    ar::vos_log("AR_QUEST_INTENT game=%s start=%s fixed_table=%d replace=%d scan=%d look=%s", extras.game.c_str(),
+                extras.start.c_str(), extras.fixed_table ? 1 : 0, extras.replace ? 1 : 0, extras.scan ? 1 : 0, extras.look.c_str());
     ar::LookStore look;   // outlives the session (declared before it)
     apply_look_overrides(extras.look, &look);
 
@@ -201,12 +209,13 @@ extern "C" void android_main(android_app *app) {
     if (game_name == "sm64") rom = external + "/rom.z64";
 
     ar::QxPlatform::Config cfg;
-    // fixed_table (default true) is the only table until the scene table replaces it; false is logged and ignored.
-    if (!extras.fixed_table) ar::vos_log("AR_QUEST_TABLE fixed_table=false not supported yet; using the fixed table");
+    // The room scan's table (the platform's placer, remembered at placement.json) unless fixed_table asks for plan 1's
+    // fixed one (debugging without a scan).
     cfg.fixed_table = ar_pose_identity();
     cfg.fixed_table.pos[1] = 0.75f;   // table height above the floor; in LOCAL space the platform moves it 1.5 m down
     cfg.fixed_table.pos[2] = -1.0f;
-    cfg.fixed_table_valid = true;
+    cfg.fixed_table_valid = extras.fixed_table;
+    cfg.record_path = internal + "/placement.json";
     ar::QxPlatform platform(app, cfg);
     app->userData = &platform;
     ar::QxSession session(adapter, platform, internal);
@@ -233,6 +242,8 @@ extern "C" void android_main(android_app *app) {
     std::string err;
     bool running = platform.start(&err);
     if (!running) ar::vos_log("AR_QUEST_FAIL %s", err.c_str());
+    if (running && extras.replace) platform.replace_table();
+    if (running && extras.scan) platform.request_scene_capture();
     bool game = running && session.start(rom, internal + "/save", &err);
     if (running && !game) ar::vos_log("AR_QUEST_FAIL %s", err.c_str());
 

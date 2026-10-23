@@ -6,6 +6,8 @@
   <uses-feature android:name="android.hardware.vulkan.level" android:version="1" android:required="true"/>
   <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true"/>
   <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true"/>
+  <uses-permission android:name="com.oculus.permission.USE_SCENE"/>
+  <uses-permission android:name="com.oculus.permission.USE_ANCHOR_API"/>
   <queries>
     <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker"/>
     <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService"/></intent>
