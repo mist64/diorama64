@@ -41,6 +41,36 @@ On the headset, press **Open table** and look at your table. **Re-place table** 
 
 The app's window has four tabs (Level, World, Look, Audio). Every setting applies live and is saved.
 
+## Meta Quest 3S
+
+Requirements: Linux with [Nix](https://nixos.org) and [direnv](https://direnv.net), a Quest 3S in developer mode with
+USB debugging allowed, and your own Super Mario 64 (US) ROM.
+
+```
+direnv allow     # or: nix develop
+./build.py
+```
+
+`./build.py` asks for your ROM and the packs, builds the app and installs it on the connected Quest (`--no-install` builds
+only). The Vision Pro instructions above are unchanged.
+
+| Control | Action |
+|---|---|
+| Left stick | Move Mario |
+| A | Jump |
+| B or X | Punch |
+| Left trigger | Crouch (Z) |
+| Y | Start / pause |
+| Grips | Drag the level on the table |
+| Right stick, while gripping | Turn the level |
+| Left menu button | Open the settings panel |
+| Right trigger + aim | Point at menus (masked in a level) |
+
+The level sits on a scanned table. If Space Setup has no table yet, the panel offers a scan.
+
+Settings are saved as `prefs.json`, `placement.json` and `pipelines.txt` in the app's files dir. The log:
+`adb logcat -s Diorama64`. Debug: `adb shell am start -n org.pagetable.diorama64/android.app.NativeActivity --ez fixed_table true` skips the table.
+
 ## Author
 
 Claude, directed by Michael Steil &lt;mist64@mac.com&gt;.
