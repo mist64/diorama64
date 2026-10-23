@@ -154,6 +154,66 @@ std::string QxSession::status() const {
     return b;
 }
 
+// The right aim ray (tracking space) into table space with the head, as PointerRouter::route builds visionOS's
+// PointerEvent; the last valid ray when the aim is lost for a frame. Returns the claim's answer.
+bool QxSession::pointer_event(PointerEvent::Phase phase, const ar_render_frame &rf) {
+    const QxActionState &a = platform_.actions();
+    if (a.right_aim_valid) {
+        const float fwd[3] = {0.f, 0.f, -1.f};   // OpenXR's aim pose points down its -Z
+        for (int k = 0; k < 3; k++) ray_o_[k] = a.right_aim.pos[k];
+        ar_quat_rotate(a.right_aim.quat, fwd, ray_d_);
+    }
+    const ar_pose table_from_tracking = ar_pose_inverse(rf.tracking_from_table);
+    PointerEvent p;
+    p.id = pointer_id_;
+    p.phase = phase;
+    const ar_pose ray_pose{{ray_o_[0], ray_o_[1], ray_o_[2]}, {0.f, 0.f, 0.f, 1.f}};
+    const ar_pose ro = ar_pose_mul(table_from_tracking, ray_pose);
+    for (int k = 0; k < 3; k++) p.ray_o[k] = ro.pos[k];
+    ar_quat_rotate(table_from_tracking.quat, ray_d_, p.ray_d);
+    p.has_ray = true;
+    p.has_hand = false;   // the controller is a ray, not a fingertip
+    p.head = rf.head_table;
+    return claim_(p);
+}
+
+void QxSession::cancel_game_pointer(const ar_render_frame &rf) {
+    if (game_live_) pointer_event(PointerEvent::cancel, rf);
+    game_live_ = false;
+}
+
+// Before step_ticks, so this frame's ticks see the pointer. The menu edge toggles the panel (plan 3), which then owns
+// the trigger: no game pointer while it is open. An unfocused session (no input) cancels a held pointer, so a pause
+// never leaves a BEGIN without its END or CANCEL.
+void QxSession::update_pointer(const ar_render_frame &rf) {
+    const QxActionState &now = platform_.actions(), &before = platform_.actions_before();
+    if (now.menu && !before.menu) {
+        panel_open_ = !panel_open_;
+        vos_log("AR_PANEL toggle open=%d", panel_open_ ? 1 : 0);
+        if (panel_open_) cancel_game_pointer(rf);
+    }
+    if (!platform_.input_focused()) {
+        cancel_game_pointer(rf);
+        owner_ = PointerOwner::none;   // the placer's drag (Task 7) ends with the focus too
+        return;
+    }
+    const PointerOwner prev = owner_;
+    const PointerDecision d = qx_route_pointer(prev, now, before);
+    owner_ = d.owner;
+    if (prev == PointerOwner::game && d.cancel) cancel_game_pointer(rf);
+    if (prev == PointerOwner::game && d.end) {
+        if (game_live_) pointer_event(PointerEvent::end, rf);
+        game_live_ = false;
+    }
+    if (d.owner == PointerOwner::game && d.begin) {
+        pointer_id_++;
+        game_live_ = claim_ && !panel_open_ && rf.table_valid && pointer_event(PointerEvent::begin, rf);
+    } else if (d.owner == PointerOwner::game && game_live_) {
+        if (panel_open_) cancel_game_pointer(rf);
+        else pointer_event(PointerEvent::move, rf);
+    }
+}
+
 void QxSession::step_ticks() { vos_step_due_ticks(rt_, hold_.limit(), nullptr, nullptr); }
 
 void QxSession::record_perf(int64_t display_ns, std::chrono::steady_clock::time_point c0, uint64_t ticks_before) {
@@ -235,6 +295,7 @@ bool QxSession::frame() {
     const uint64_t ticks_before = ar_runtime_ticks_done(rt_);
     table_valid_ = rf.table_valid != 0;
     const LightingFrame lf = update_lighting(rf);       // before step_ticks: this frame's ticks already use the steering
+    update_pointer(rf);
     // The ticks stepped below read this frame's head but are first shown by the next frame; the view matrices always
     // use the current head.
     step_ticks();
@@ -341,6 +402,14 @@ void QxSession::stop() {
         save_pipelines();
         if (perf_.frames() > 0) log_perf_window();
     }
+    if (rt_ && game_live_ && claim_) {   // a held pointer is cancelled before the game goes
+        PointerEvent p;
+        p.id = pointer_id_;
+        p.phase = PointerEvent::cancel;
+        claim_(p);
+    }
+    game_live_ = false;
+    owner_ = PointerOwner::none;
     if (rt_) ar_runtime_destroy(rt_);
     rt_ = nullptr;
     renderer_.reset();

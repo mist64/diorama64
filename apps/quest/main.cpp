@@ -211,6 +211,23 @@ extern "C" void android_main(android_app *app) {
     app->userData = &platform;
     ar::QxSession session(adapter, platform, internal);
     session.set_look_store(&look);
+    if (game_name == "sm64") {
+        // vos_app.mm's pointer claim: the Touch trigger's ray drives sm64's title screen and menus. The Quest never
+        // records or replays, so the pointer lock stays off. Logged at begin / end / cancel, never per move.
+        ar_adapter_sm64_set_pointer_lock(0);
+        session.set_pointer_claim([](const ar::PointerEvent &e) {
+            sm64_pointer p{};
+            p.id = e.id; p.phase = (int)e.phase; p.has_hand = e.has_hand ? 1 : 0; p.head = e.head; p.no_ray = e.has_ray ? 0 : 1;
+            for (int k = 0; k < 3; k++) { p.ray_o[k] = e.ray_o[k]; p.ray_d[k] = e.ray_d[k]; p.hand[k] = e.hand[k]; }
+            const int claimed = ar_adapter_sm64_pointer(&p);
+            if (e.phase == ar::PointerEvent::begin)
+                ar::vos_log("AR_POINTER begin id=%llu claimed=%d target=%d ndc=%.3f,%.3f", (unsigned long long)e.id, claimed,
+                            p.target, (double)p.ndc[0], (double)p.ndc[1]);
+            else if (e.phase == ar::PointerEvent::end || e.phase == ar::PointerEvent::cancel)
+                ar::vos_log("AR_POINTER %s id=%llu", e.phase == ar::PointerEvent::end ? "end" : "cancel", (unsigned long long)e.id);
+            return claimed != 0;
+        });
+    }
 
     // running: the platform frame loop runs; game: the session drives it (else passthrough only, after a failed start).
     std::string err;

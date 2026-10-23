@@ -9,6 +9,7 @@
 #pragma once
 #include <stdint.h>
 #include <atomic>
+#include <functional>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -21,6 +22,7 @@ extern "C" {
 #include "render_device.h"
 #include "renderer.h"
 #include "room_light_driver.h"
+#include "vos_input.h"
 #include "vos_perf.h"
 #include "vos_state.h"
 
@@ -45,12 +47,22 @@ public:
     void set_world_clip(bool floor, bool box) { wclip_floor_ = floor; wclip_box_ = box; }
     // The key light's steering (on, direction in table axes) whenever it changes; render thread.
     void set_key_light_callback(void (*fn)(void *ctx, int on, const float dir[3]), void *ctx) { light_.set_key_light_callback(fn, ctx); }
+    // The game pointer (sm64's title screen and menus), as visionOS's set_pointer_claim: the right controller's aim
+    // ray while its trigger is held, in table space with the head, offered at BEGIN only while the table is placed and
+    // the panel is closed; the claim's MOVE / END / CANCEL follow whatever it returns at BEGIN (true: claimed). Before
+    // start; empty (the default): no game pointer.
+    void set_pointer_claim(PointerClaim claim) { claim_ = std::move(claim); }
+    bool panel_open() const { return panel_open_; }   // toggled by the left menu button (plan 3's panel)
+    PointerOwner pointer_owner() const { return owner_; }
     LookSettings effective_look() const;
     void apply_tex_filter();   // the look's edge_aa and tex_smooth onto the device, when they changed
 
 private:
     LightingFrame update_lighting(const ar_render_frame &rf);
     void step_ticks();
+    void update_pointer(const ar_render_frame &rf);
+    bool pointer_event(PointerEvent::Phase phase, const ar_render_frame &rf);
+    void cancel_game_pointer(const ar_render_frame &rf);
     void warm_pipelines(uint32_t samples);
     void warm_in_background(uint32_t samples);
     void save_pipelines();
@@ -86,6 +98,12 @@ private:
     uint64_t ao_bakes_logged_ = 0, ao_failures_logged_ = 0;
     size_t pipelines_saved_ = 0, at_draw_queued_ = 0;
     std::string pipeline_file_;
+    PointerClaim claim_;
+    PointerOwner owner_ = PointerOwner::none;
+    bool game_live_ = false;           // a BEGIN was claimed: an END or CANCEL is still owed
+    uint64_t pointer_id_ = 0;
+    float ray_o_[3] = {0.f, 0.f, 0.f}, ray_d_[3] = {0.f, 0.f, -1.f};   // the last valid right aim ray, tracking space
+    bool panel_open_ = false;
 };
 
 }

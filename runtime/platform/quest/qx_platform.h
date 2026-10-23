@@ -3,6 +3,7 @@
 #include <string>
 #include <vulkan/vulkan.h>
 #include "ar_platform.h"
+#include "qx_input_pure.h"
 #include "render_device.h"
 #include "vulkan_device.h"
 
@@ -37,6 +38,13 @@ public:
     void end_submission();                  // after the GPU work is submitted: release the swapchain image, xrEndFrame; a no-op when this frame had no xrBeginFrame (session not running)
     bool exiting() const;
     const ar_frame_info &last_frame() const;   // what the last wait_frame (called by the runtime's begin_frame) returned
+    // The Touch controllers' sample of the last wait_frame and of the one before it (zeroed while unfocused), and
+    // whether anything but the aim poses changed between them. Render thread.
+    const QxActionState &actions() const;
+    const QxActionState &actions_before() const;
+    bool actions_changed() const;
+    bool input_focused() const;               // the last sample came from a focused session (xrSyncActions ran)
+    void hold_until_released(uint32_t mask);  // the pad drops these buttons until they are released (any thread)
 
     struct Impl;
 private:

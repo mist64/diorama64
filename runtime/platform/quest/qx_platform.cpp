@@ -8,6 +8,7 @@
 #include <time.h>
 #include <vector>
 #include "qx_convert.h"
+#include "qx_input.h"
 #include "vos_log.h"
 
 namespace ar {
@@ -95,6 +96,12 @@ struct QxPlatform::Impl {
     ar_pose last_head;
     ar_frame_info last_info;      // what the last wait_frame returned
 
+    // The Touch controllers: sampled once per wait_frame (render thread); the pad copy inside is read by get_pad.
+    QxInput input;
+    QxActionState actions{}, actions_before{};
+    bool actions_changed = false;
+    bool input_focused = false;   // this frame's sample came from a focused session
+
     Impl(android_app *a, const QxPlatform::Config &c) : app(a), cfg(c) {
         memset(&api, 0, sizeof api);
         memset(&submit, 0, sizeof submit);
@@ -136,6 +143,7 @@ struct QxPlatform::Impl {
     void poll_events();
     void set_passthrough(bool on);
     void end_frame();
+    void sample_input(XrTime t, bool locate);
     void destroy();
 };
 
@@ -330,6 +338,10 @@ bool QxPlatform::Impl::create_session(std::string *err) {
     rci.poseInReferenceSpace.orientation.w = 1.f;
     if (!ok(xrCreateReferenceSpace(session, &rci, &app_space), "xrCreateReferenceSpace", err)) return false;
     vos_log("AR_QUEST_SPACE stage=%d", stage ? 1 : 0);
+    // No controllers is not fatal: the game still boots (and passthrough shows), it just reads a zero pad.
+    std::string input_err;
+    if (input.create(instance, session, &input_err)) input.attach();
+    else vos_log("AR_INPUT profile=touch attached=0 (%s)", input_err.c_str());
     return true;
 }
 
@@ -523,8 +535,24 @@ void QxPlatform::Impl::end_frame() {
     waited = begun = acquired = submit_valid = false;
 }
 
+// This frame's controller sample (locate: the session is running and xrWaitFrame gave t). xrSyncActions only while
+// focused; otherwise no input. actions_changed compares everything but the aim poses and the time.
+void QxPlatform::Impl::sample_input(XrTime t, bool locate) {
+    actions_before = actions;
+    input_focused = locate && session_running && state == XR_SESSION_STATE_FOCUSED;
+    if (input_focused) input.sync(app_space, t, &actions);
+    else input.clear(t, &actions);
+    const QxActionState &a = actions, &b = actions_before;
+    actions_changed = a.left_active != b.left_active || a.right_active != b.right_active || a.lx != b.lx || a.ly != b.ly ||
+                      a.rx != b.rx || a.ry != b.ry || a.a != b.a || a.b != b.b || a.x != b.x || a.y != b.y ||
+                      a.menu != b.menu || a.lstick != b.lstick || a.rstick != b.rstick || a.lt != b.lt || a.rt != b.rt ||
+                      a.lg != b.lg || a.rg != b.rg || a.left_aim_valid != b.left_aim_valid ||
+                      a.right_aim_valid != b.right_aim_valid;
+}
+
 void QxPlatform::Impl::destroy() {
     if (vk.device != VK_NULL_HANDLE) vkDeviceWaitIdle(vk.device);
+    input.destroy();   // its action spaces belong to the session
     if (passthrough_layer != XR_NULL_HANDLE) ext.destroy_passthrough_layer(passthrough_layer);
     if (passthrough != XR_NULL_HANDLE) ext.destroy_passthrough(passthrough);
     passthrough_layer = XR_NULL_HANDLE;
@@ -570,6 +598,7 @@ int wait_frame(Impl *m, ar_frame_info *out) {
             if (m->exit_requested) return 0;
             if (m->session_running && m->waited) {
                 sleep_ms(10);
+                m->sample_input(0, false);
                 memset(out, 0, sizeof *out);
                 out->tracking_from_head = m->last_head;
                 return 1;
@@ -582,6 +611,7 @@ int wait_frame(Impl *m, ar_frame_info *out) {
     if (m->exit_requested) return 0;
     if (!m->session_running) {
         sleep_ms(10);
+        m->sample_input(0, false);
         memset(out, 0, sizeof *out);
         out->tracking_from_head = m->last_head;
         return 1;
@@ -589,6 +619,7 @@ int wait_frame(Impl *m, ar_frame_info *out) {
     XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
     m->frame_state = XrFrameState{XR_TYPE_FRAME_STATE};
     if (!m->ok(xrWaitFrame(m->session, &wi, &m->frame_state), "xrWaitFrame")) {
+        m->sample_input(0, false);
         memset(out, 0, sizeof *out);
         out->tracking_from_head = m->last_head;
         return m->exit_requested ? 0 : 1;
@@ -604,6 +635,7 @@ int wait_frame(Impl *m, ar_frame_info *out) {
     for (auto &v : m->views) v = XrView{XR_TYPE_VIEW};
     m->view_flags = 0;
     if (m->ok(xrLocateViews(m->session, &li, &vs, kEyes, &n, m->views), "xrLocateViews") && n == kEyes) m->view_flags = vs.viewStateFlags;
+    m->sample_input(m->frame_state.predictedDisplayTime, true);
 
     float hz = m->display_hz;
     if (hz <= 0.f && m->frame_state.predictedDisplayPeriod > 0) hz = 1e9f / (float)m->frame_state.predictedDisplayPeriod;
@@ -659,9 +691,10 @@ int cb_get_table(void *user, ar_table *out) {
     return 1;
 }
 
-int cb_get_pad(void *, uint32_t, ar_pad *out) {
-    memset(out, 0, sizeof *out);   // game thread: touches no XR state
-    return 0;
+int cb_get_pad(void *user, uint32_t player, ar_pad *out) {
+    memset(out, 0, sizeof *out);   // touches no XR state: the last synced pad, under QxInput's mutex
+    if (player != 0) return 0;
+    return static_cast<Impl *>(user)->input.get_pad(out);
 }
 
 ar_session_state cb_session_state(void *user) {
@@ -732,6 +765,11 @@ uint32_t QxPlatform::swapchain_width() const { return m_->width; }
 uint32_t QxPlatform::swapchain_height() const { return m_->height; }
 void QxPlatform::end_submission() { m_->end_frame(); }
 const ar_frame_info &QxPlatform::last_frame() const { return m_->last_info; }
+const QxActionState &QxPlatform::actions() const { return m_->actions; }
+const QxActionState &QxPlatform::actions_before() const { return m_->actions_before; }
+bool QxPlatform::actions_changed() const { return m_->actions_changed; }
+bool QxPlatform::input_focused() const { return m_->input_focused; }
+void QxPlatform::hold_until_released(uint32_t mask) { m_->input.hold_until_released(mask); }
 bool QxPlatform::exiting() const { return m_->exit_requested || m_->app->destroyRequested; }
 
 }  // namespace ar
