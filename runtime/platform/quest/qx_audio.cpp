@@ -13,7 +13,7 @@ constexpr uint32_t kDrainBlock = 1024;
 constexpr uint32_t kDrainMaxBlocks = 64;                 // 65536 frames, beyond any ring the runtime keeps
 }  // namespace
 
-QxAudio::QxAudio(ar_runtime *rt) : rt_(rt), drain_(2 * kDrainBlock, 0) {}
+QxAudio::QxAudio(ar_runtime *rt) : rt_(rt), drain_(2 * kDrainBlock, 0), err_(new ErrorFlag) {}
 
 QxAudio::~QxAudio() { stop(); }
 
@@ -39,9 +39,10 @@ aaudio_data_callback_result_t QxAudio::on_data(AAudioStream *, void *user, void 
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-// Any thread AAudio picks; the stream must not be closed here: poll() reopens it on the render thread.
+// Any thread AAudio picks (on some paths a thread of its own that close does not join); the stream must not be closed
+// here: poll() reopens it on the render thread. user is the ErrorFlag, which is never freed.
 void QxAudio::on_error(AAudioStream *, void *user, aaudio_result_t) {
-    static_cast<QxAudio *>(user)->restart_needed_.store(true, std::memory_order_release);
+    static_cast<ErrorFlag *>(user)->set.store(true, std::memory_order_release);
 }
 
 void QxAudio::reset_input() {
@@ -63,8 +64,9 @@ bool QxAudio::open_stream(std::string *err) {
     AAudioStreamBuilder_setChannelCount(b, 2);
     AAudioStreamBuilder_setSampleRate(b, kOutHz);
     AAudioStreamBuilder_setDataCallback(b, on_data, this);
-    AAudioStreamBuilder_setErrorCallback(b, on_error, this);
+    AAudioStreamBuilder_setErrorCallback(b, on_error, err_);
     AAudioStream *s = nullptr;
+    err_->set.store(false, std::memory_order_relaxed);   // the previous stream is closed: its flag is stale
     r = AAudioStreamBuilder_openStream(b, &s);
     AAudioStreamBuilder_delete(b);
     if (r != AAUDIO_OK || !s) { *err = std::string("AAudioStreamBuilder_openStream: ") + AAudio_convertResultToText(r); return false; }
@@ -77,7 +79,6 @@ bool QxAudio::open_stream(std::string *err) {
         return false;
     }
     stream_ = s;
-    restart_needed_.store(false, std::memory_order_relaxed);
     return true;
 }
 
@@ -123,8 +124,8 @@ bool QxAudio::start(bool spatial, std::string *err) {
     return true;
 }
 
-// Never waits: the stop is requested and the callback winds down on its own; resume() starts again only once AAudio
-// reports STOPPED (poll() checks each frame).
+// Never waits: the stop is requested and the callback winds down on its own; resume() starts again once the state has
+// left STOPPING (poll() checks each frame).
 void QxAudio::pause() {
     if (!started_ || paused_) return;
     paused_ = true;
@@ -136,8 +137,8 @@ void QxAudio::pause() {
     if (r != AAUDIO_OK) vos_log("AR_ERROR audio: AAudioStream_requestStop on pause: %s", AAudio_convertResultToText(r));
 }
 
-// The burst protection: the bound and resampler are fresh and the game audio queued while paused is dropped
-// (reset_input), done in poll() once no callback can run.
+// No buffer is swapped and nothing drained here (a stopped stream's callback may not have returned yet): the latency
+// bound's first pull drains the game's ring and trims to the standing 800 frames, which is the burst protection.
 void QxAudio::resume() {
     if (!started_ || !paused_) return;
     paused_ = false;
@@ -147,20 +148,23 @@ void QxAudio::resume() {
 
 void QxAudio::poll() {
     if (!started_) return;
-    const bool disconnected = restart_needed_.load(std::memory_order_acquire) ||
-                              (stream_ && AAudioStream_getState(stream_) == AAUDIO_STREAM_STATE_DISCONNECTED);
-    if (disconnected) {
+    const bool flagged = err_->set.exchange(false, std::memory_order_acq_rel);
+    if (stream_ && (flagged || AAudioStream_getState(stream_) == AAUDIO_STREAM_STATE_DISCONNECTED)) {
         close_stream();
-        retry_at_ = {};
+        retry_at_ = {};   // a live stream was lost: reopen at once
     }
     if (paused_) return;
     if (stream_) {
-        if (!start_pending_) return;
         const aaudio_stream_state_t st = AAudioStream_getState(stream_);
         if (st == AAUDIO_STREAM_STATE_STOPPING) return;   // still winding down: next frame
+        if (st != AAUDIO_STREAM_STATE_STOPPED && st != AAUDIO_STREAM_STATE_OPEN) {
+            start_pending_ = false;   // starting or playing (a stop that never took)
+            stopped_polls_ = 0;
+            return;
+        }
+        if (!start_pending_ && ++stopped_polls_ < 2) return;   // a lost resume: start it on the second poll
         start_pending_ = false;
-        if (st == AAUDIO_STREAM_STATE_STARTING || st == AAUDIO_STREAM_STATE_STARTED) return;   // the stop never took: playing
-        reset_input();   // STOPPED (or OPEN): no callback runs
+        stopped_polls_ = 0;
         const aaudio_result_t r = AAudioStream_requestStart(stream_);
         if (r == AAUDIO_OK) return;
         vos_log("AR_ERROR audio: AAudioStream_requestStart on resume: %s", AAudio_convertResultToText(r));
@@ -168,25 +172,37 @@ void QxAudio::poll() {
         retry_at_ = {};
     }
     start_pending_ = false;
+    stopped_polls_ = 0;
     const auto now = std::chrono::steady_clock::now();
     if (now < retry_at_) return;
-    retry_at_ = now + std::chrono::seconds(1);
+    retry_at_ = now + std::chrono::seconds(1);   // a failed open retries once a second
     reset_input();   // no stream: no callback
     std::string err;
-    if (!open_stream(&err)) { vos_log("AR_ERROR audio: reopening: %s", err.c_str()); return; }
-    const aaudio_result_t r = AAudioStream_requestStart(stream_);
-    if (r != AAUDIO_OK) {
-        vos_log("AR_ERROR audio: AAudioStream_requestStart on reopen: %s", AAudio_convertResultToText(r));
-        close_stream();
+    aaudio_result_t r = AAUDIO_OK;
+    if (open_stream(&err)) {
+        r = AAudioStream_requestStart(stream_);
+        if (r != AAUDIO_OK) {
+            err = std::string("AAudioStream_requestStart: ") + AAudio_convertResultToText(r);
+            close_stream();
+        }
+    }
+    if (!stream_) {
+        if (reopen_failures_++ == 0 || now >= fail_log_at_) {
+            vos_log("AR_ERROR audio: reopening (failures=%u, retrying each second): %s", reopen_failures_, err.c_str());
+            fail_log_at_ = now + std::chrono::seconds(10);
+        }
         return;
     }
-    vos_log("AR_AUDIO restart burst=%d", (int)AAudioStream_getFramesPerBurst(stream_));
+    vos_log("AR_AUDIO restart burst=%d failures=%u", (int)AAudioStream_getFramesPerBurst(stream_), reopen_failures_);
+    reopen_failures_ = 0;
 }
 
 void QxAudio::stop() {
     close_stream();
     started_ = paused_ = start_pending_ = false;
-    restart_needed_.store(false, std::memory_order_relaxed);
+    stopped_polls_ = 0;
+    reopen_failures_ = 0;
+    err_->set.store(false, std::memory_order_relaxed);
 }
 
 bool QxAudio::running() const { return started_ && !paused_ && stream_ != nullptr; }

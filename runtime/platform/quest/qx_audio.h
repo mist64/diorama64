@@ -3,8 +3,13 @@
 // (vos_resample.h). Spatial output (start(true, ...), set_tuning, set_poly_mode, listener) is plan 3's Task 2.
 //
 // Threads: every member is for the render thread (QxSession's) except the counters (any thread). The data callback runs
-// on AAudio's real-time thread and touches only rt_, the resampler, the latency bound (both swapped only while no
-// stream is started) and the atomics; the error callback only sets restart_needed_, which poll() acts on.
+// on AAudio's real-time thread and touches only rt_, the resampler, the latency bound and the atomics. The resampler and
+// bound are replaced (reset_input) only before the first start and after AAudioStream_close, which is documented to end
+// the callbacks; never after a mere stop, since STOPPED does not promise the callback has returned (a legacy AudioTrack
+// callback may still be inside on_data). A resume therefore just starts the stream again: the bound's first pull drains
+// the game's ring and trims it to the standing 800 frames, which is the burst protection. The error callback only sets
+// a flag that lives in a never-freed ErrorFlag, so an error callback that outlives the stream or QxAudio stays harmless;
+// poll() consumes it.
 #pragma once
 #include <stdint.h>
 #include <atomic>
@@ -39,8 +44,9 @@ public:
     void resume();
     // Stops and closes the stream: no callback runs after it returns. Safe to call twice and without start.
     void stop();
-    // Each frame: a resume waiting for STOPPED starts the stream; a disconnected stream (the error callback's flag, or
-    // its state) is closed and reopened, the queued input dropped; a failed reopen is retried once a second.
+    // Each frame: a resume waiting for STOPPED starts the stream (as does a stream found STOPPED on two polls while not
+    // paused: a lost resume); a disconnected stream (the error callback's flag, or its state) is closed and reopened
+    // with fresh input; a failed reopen is retried once a second, logged at the first failure and then every 10 s.
     void poll();
     bool running() const;   // a stream is open and not paused
     bool spatial() const { return spatial_; }
@@ -58,7 +64,7 @@ private:
     static void on_error(AAudioStream *s, void *user, aaudio_result_t error);
     bool open_stream(std::string *err);
     void close_stream();    // requestStop, a wait for STOPPED bounded to 50 ms (logged when it expires), close
-    void reset_input();     // only while no callback runs: a fresh bound and resampler, the runtime's queued audio dropped
+    void reset_input();     // before the first start or after close only: a fresh bound and resampler, the ring drained
 
     ar_runtime *rt_;
     std::unique_ptr<StereoResampler> rs_;
@@ -68,10 +74,14 @@ private:
     bool started_ = false;         // start() succeeded and stop() has not run (the stream may be reopening)
     bool paused_ = false;
     bool start_pending_ = false;   // resumed while the stop was still settling: poll() starts the stream at STOPPED
+    int stopped_polls_ = 0;        // consecutive polls that found the unpaused stream STOPPED / OPEN
+    uint32_t reopen_failures_ = 0;
+    std::chrono::steady_clock::time_point fail_log_at_{};
     bool spatial_ = false;
     uint64_t trimmed_base_ = 0;    // the trimmed frames of the bounds reset_input replaced
     std::chrono::steady_clock::time_point retry_at_{};
-    std::atomic<bool> restart_needed_{false};
+    struct ErrorFlag { std::atomic<bool> set{false}; };
+    ErrorFlag *err_;               // the error callback's user pointer: allocated once, deliberately never freed
     std::atomic<uint64_t> frames_{0}, missing_{0};
 };
 
