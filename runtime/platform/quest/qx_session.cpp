@@ -93,6 +93,7 @@ bool QxSession::start(const std::string &rom_path, const std::string &save_dir, 
     warm_in_background(samples);
     rt_ = ar_runtime_create(adapter_, platform_.api());
     if (!rt_) return fail("ar_runtime_create failed");
+    if (platform_.api()->set_passthrough) platform_.api()->set_passthrough(platform_.api()->user, 1);   // parity: always on
     ar_runtime_set_texture_sink(rt_, upload, dev_.get());
     if (!save_dir.empty() && ::mkdir(save_dir.c_str(), 0700) != 0 && errno != EEXIST)
         vos_log("AR_QUEST save folder %s: mkdir failed (errno %d)", save_dir.c_str(), errno);

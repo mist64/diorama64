@@ -4,9 +4,11 @@
 #include <android_native_app_glue.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include <math.h>
 #include <string.h>
 #include <time.h>
 #include <vector>
+#include "ar_runtime.h"
 #include "qx_convert.h"
 #include "qx_input.h"
 #include "qx_perm.h"
@@ -72,6 +74,7 @@ struct QxPlatform::Impl {
     bool has_refresh_ext = false;
     bool has_scene_ext = false;     // XR_FB_spatial_entity, _query, _storage and XR_FB_scene (capture optional)
     bool has_capture_ext = false;
+    bool has_depth_ext = false;     // XR_KHR_composition_layer_depth
 
     QxVulkan vk{};
 
@@ -80,6 +83,14 @@ struct QxPlatform::Impl {
     uint32_t width = 0, height = 0;
     VkFormat format = VK_FORMAT_UNDEFINED;
     bool linearize = false;
+
+    // The depth swapchain (XR_KHR_composition_layer_depth): same size and array layout as the colour one, acquired,
+    // waited and released with it. depth_images stays empty when depth is off.
+    XrSwapchain depth_swapchain = XR_NULL_HANDLE;
+    std::vector<QxSwapchainImage> depth_images;
+    VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    bool depth_acquired = false;  // a depth image is acquired and waited (colour is too)
+    uint32_t depth_index = 0;
 
     XrPassthroughFB passthrough = XR_NULL_HANDLE;
     XrPassthroughLayerFB passthrough_layer = XR_NULL_HANDLE;
@@ -161,6 +172,8 @@ struct QxPlatform::Impl {
     bool create_vulkan(std::string *err);
     bool create_session(std::string *err);
     bool create_swapchain(std::string *err);
+    void create_depth_swapchain(const std::vector<int64_t> &formats);
+    void destroy_depth_swapchain();
     bool create_passthrough(std::string *err);
     void request_refresh();
     void poll_events();
@@ -197,6 +210,8 @@ bool QxPlatform::Impl::create_instance(std::string *err) {
     has_refresh_ext = has_ext(avail, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     if (has_passthrough_ext) want.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
     if (has_refresh_ext) want.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    has_depth_ext = has_ext(avail, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
+    if (has_depth_ext) want.push_back(XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME);
     has_scene_ext = has_ext(avail, XR_FB_SPATIAL_ENTITY_EXTENSION_NAME) && has_ext(avail, XR_FB_SPATIAL_ENTITY_QUERY_EXTENSION_NAME) &&
                     has_ext(avail, XR_FB_SPATIAL_ENTITY_STORAGE_EXTENSION_NAME) && has_ext(avail, XR_FB_SCENE_EXTENSION_NAME);
     has_capture_ext = has_scene_ext && has_ext(avail, XR_FB_SCENE_CAPTURE_EXTENSION_NAME);
@@ -385,6 +400,66 @@ bool QxPlatform::Impl::create_session(std::string *err) {
     return true;
 }
 
+// Best effort: any failure leaves depth off (colour-only submission), never fails the start.
+void QxPlatform::Impl::create_depth_swapchain(const std::vector<int64_t> &formats) {
+    if (!has_depth_ext) { vos_log("AR_QUEST_DEPTH off reason=extension"); return; }
+    auto listed = [&](VkFormat f) { for (int64_t x : formats) if (x == (int64_t)f) return true; return false; };
+    VkFormat df = VK_FORMAT_UNDEFINED;
+    if (listed(VK_FORMAT_D32_SFLOAT)) df = VK_FORMAT_D32_SFLOAT;
+    else if (listed(VK_FORMAT_D24_UNORM_S8_UINT)) df = VK_FORMAT_D24_UNORM_S8_UINT;
+    if (df == VK_FORMAT_UNDEFINED) { vos_log("AR_QUEST_DEPTH off reason=format"); return; }
+    XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    sci.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    sci.format = (int64_t)df;
+    sci.sampleCount = 1;
+    sci.width = width;
+    sci.height = height;
+    sci.faceCount = 1;
+    sci.arraySize = kEyes;
+    sci.mipCount = 1;
+    if (!ok(xrCreateSwapchain(session, &sci, &depth_swapchain), "xrCreateSwapchain(depth)")) {
+        depth_swapchain = XR_NULL_HANDLE;
+        vos_log("AR_QUEST_DEPTH off reason=create");
+        return;
+    }
+    uint32_t n = 0;
+    std::vector<XrSwapchainImageVulkan2KHR> xi;
+    if (ok(xrEnumerateSwapchainImages(depth_swapchain, 0, &n, nullptr), "xrEnumerateSwapchainImages(depth)")) {
+        xi.assign(n, XrSwapchainImageVulkan2KHR{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+        if (!ok(xrEnumerateSwapchainImages(depth_swapchain, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader *>(xi.data())),
+                "xrEnumerateSwapchainImages(depth)"))
+            xi.clear();
+    }
+    depth_images.clear();
+    bool good = !xi.empty();
+    for (uint32_t i = 0; good && i < n; i++) {
+        QxSwapchainImage img{xi[i].image, VK_NULL_HANDLE, df, width, height, kEyes};
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = img.image;
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        vci.format = df;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, kEyes};
+        if (vkCreateImageView(vk.device, &vci, nullptr, &img.view) != VK_SUCCESS) { good = false; break; }
+        depth_images.push_back(img);
+    }
+    if (!good) {
+        destroy_depth_swapchain();
+        vos_log("AR_QUEST_DEPTH off reason=images");
+        return;
+    }
+    depth_format = df;
+    vos_log("AR_QUEST_DEPTH on format=%d", (int)df);
+}
+
+void QxPlatform::Impl::destroy_depth_swapchain() {
+    for (auto &img : depth_images)
+        if (img.view != VK_NULL_HANDLE) vkDestroyImageView(vk.device, img.view, nullptr);
+    depth_images.clear();
+    if (depth_swapchain != XR_NULL_HANDLE) xrDestroySwapchain(depth_swapchain);
+    depth_swapchain = XR_NULL_HANDLE;
+    depth_acquired = false;
+}
+
 bool QxPlatform::Impl::create_swapchain(std::string *err) {
     uint32_t n = 0;
     if (!ok(xrEnumerateViewConfigurationViews(instance, system, kViewConfig, 0, &n, nullptr), "xrEnumerateViewConfigurationViews", err))
@@ -433,6 +508,7 @@ bool QxPlatform::Impl::create_swapchain(std::string *err) {
         images.push_back(img);
     }
     vos_log("AR_QUEST_SWAPCHAIN %ux%u format=%d linearize=%d", width, height, (int)format, linearize ? 1 : 0);
+    create_depth_swapchain(formats);
     return true;
 }
 
@@ -493,7 +569,7 @@ void QxPlatform::Impl::poll_events() {
         case XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB: {
             const auto *e = reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB *>(&ev);
             display_hz = e->toDisplayRefreshRate;
-            vos_log("AR_QUEST_REFRESH requested=%g got=%g", cfg.refresh_hz, display_hz);
+            vos_log("AR_QUEST_REFRESH changed from=%g to=%g", e->fromDisplayRefreshRate, e->toDisplayRefreshRate);
             break;
         }
         case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED: {
@@ -532,7 +608,7 @@ void QxPlatform::Impl::set_passthrough(bool on) {
 
 void QxPlatform::Impl::end_frame() {
     if (!begun) {   // waited stays set: the next wait_frame begins (and ends) that frame before waiting again
-        acquired = submit_valid = false;
+        acquired = depth_acquired = submit_valid = false;
         return;
     }
     bool released = false;
@@ -540,8 +616,15 @@ void QxPlatform::Impl::end_frame() {
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         released = ok(xrReleaseSwapchainImage(swapchain, &ri), "xrReleaseSwapchainImage");
     }
+    bool depth_released = false;
+    if (depth_acquired) {
+        XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        depth_released = ok(xrReleaseSwapchainImage(depth_swapchain, &ri), "xrReleaseSwapchainImage(depth)");
+    }
+    const bool with_depth = depth_released && released;
     XrCompositionLayerPassthroughFB pt_layer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
     XrCompositionLayerProjectionView pviews[kEyes];
+    XrCompositionLayerDepthInfoKHR dviews[kEyes];   // chained from pviews[].next; both live until xrEndFrame returns
     XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     const XrCompositionLayerBaseHeader *layers[2];
     uint32_t layer_count = 0;
@@ -561,6 +644,19 @@ void QxPlatform::Impl::end_frame() {
             pviews[eye].subImage.imageRect.offset = {0, 0};
             pviews[eye].subImage.imageRect.extent = {(int32_t)width, (int32_t)height};
             pviews[eye].subImage.imageArrayIndex = eye;
+            if (with_depth) {   // reverse-Z infinite far: depth 1 at the near plane, 0 at infinity
+                const float near_m = submit.views[eye].near_m > 0.f ? submit.views[eye].near_m : AR_NEAR_M;
+                dviews[eye] = XrCompositionLayerDepthInfoKHR{XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR};
+                dviews[eye].subImage.swapchain = depth_swapchain;
+                dviews[eye].subImage.imageRect.offset = {0, 0};
+                dviews[eye].subImage.imageRect.extent = {(int32_t)width, (int32_t)height};
+                dviews[eye].subImage.imageArrayIndex = eye;
+                dviews[eye].minDepth = 0.f;
+                dviews[eye].maxDepth = 1.f;
+                dviews[eye].nearZ = INFINITY;
+                dviews[eye].farZ = near_m;
+                pviews[eye].next = &dviews[eye];
+            }
         }
         proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         proj.space = app_space;
@@ -574,7 +670,7 @@ void QxPlatform::Impl::end_frame() {
     fe.layerCount = layer_count;
     fe.layers = layer_count ? layers : nullptr;
     ok(xrEndFrame(session, &fe), "xrEndFrame");
-    waited = begun = acquired = submit_valid = false;
+    waited = begun = acquired = depth_acquired = submit_valid = false;
 }
 
 // This frame's controller sample (locate: the session is running and xrWaitFrame gave t). xrSyncActions only while
@@ -682,6 +778,7 @@ void QxPlatform::Impl::destroy() {
     for (auto &img : images)
         if (img.view != VK_NULL_HANDLE) vkDestroyImageView(vk.device, img.view, nullptr);
     images.clear();
+    destroy_depth_swapchain();
     if (swapchain != XR_NULL_HANDLE) xrDestroySwapchain(swapchain);
     if (app_space != XR_NULL_HANDLE) xrDestroySpace(app_space);
     if (session != XR_NULL_HANDLE) {
@@ -792,6 +889,20 @@ void cb_begin_frame(void *user) {
     wi.timeout = XR_INFINITE_DURATION;
     if (!m->ok(xrWaitSwapchainImage(m->swapchain, &wi), "xrWaitSwapchainImage")) return;
     m->acquired = m->image_index < m->images.size();
+    m->depth_acquired = false;
+    if (!m->acquired || m->depth_swapchain == XR_NULL_HANDLE) return;
+    // Depth in lockstep; a depth failure drops depth for this frame only (colour is still waited and rendered).
+    if (!m->ok(xrAcquireSwapchainImage(m->depth_swapchain, &ai, &m->depth_index), "xrAcquireSwapchainImage(depth)")) return;
+    if (!m->ok(xrWaitSwapchainImage(m->depth_swapchain, &wi), "xrWaitSwapchainImage(depth)")) {
+        XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        m->ok(xrReleaseSwapchainImage(m->depth_swapchain, &ri), "xrReleaseSwapchainImage(depth)");
+        return;
+    }
+    m->depth_acquired = m->depth_index < m->depth_images.size();
+    if (!m->depth_acquired) {
+        XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        m->ok(xrReleaseSwapchainImage(m->depth_swapchain, &ri), "xrReleaseSwapchainImage(depth)");
+    }
 }
 
 void cb_end_frame(void *user, const ar_submit_info *used) {
@@ -899,6 +1010,7 @@ bool QxPlatform::external_view(uint32_t i, ExternalView *out) const {
     out->slice = i;
     out->viewport = Viewport{0.f, 0.f, (float)m_->width, (float)m_->height};
     out->linearize = m_->linearize;
+    if (m_->depth_acquired) out->depth = &m_->depth_images[m_->depth_index];
     return true;
 }
 
