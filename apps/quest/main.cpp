@@ -1,8 +1,11 @@
 #include <android_native_app_glue.h>
+#include <android/asset_manager.h>
 #include <android/looper.h>
 #include <jni.h>
 #include <string>
 #include <vector>
+#include <chrono>
+#include "bundled_copy.h"
 #include "qx_app.h"
 #include "qx_platform.h"
 #include "vos_api.h"
@@ -132,7 +135,17 @@ extern "C" void android_main(android_app *app) {
     for (const auto &a : args) argv.push_back(a.c_str());
     qx_app_set_android(app);
     qx_app_set_pump(pump_now, app);
-    // bundle_dir: the bundled data copied out of the APK (plan 3 Task 6); documents: the files directory (prefs.json,
+    // The ROM, packs and resources ship as APK assets; copy them to internalDataPath/bundled on the first launch and
+    // whenever the APK's manifests change (atomic: written to bundled.tmp, renamed into place).
+    const auto t0 = std::chrono::steady_clock::now();
+    int copied = 0;
+    std::string copy_err;
+    const bool copy_ok = ar::bundled_sync(app->activity->assetManager, internal + "/bundled", &copy_err, &copied);
+    const double copy_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!copy_ok) ar::vos_log("AR_BUNDLED failed %s", copy_err.c_str());
+    else if (copied < 0) ar::vos_log("AR_BUNDLED up_to_date");
+    else ar::vos_log("AR_BUNDLED copied=%d ms=%.0f", copied, copy_ms);
+    // bundle_dir: the bundled data copied out of the APK; documents: the files directory (prefs.json,
     // placement.json, pipelines.txt, save/, sm64ar.log).
     const int configured = arvos_configure((int)argv.size(), argv.data(), (internal + "/bundled").c_str(), internal.c_str());
     std::string joined;

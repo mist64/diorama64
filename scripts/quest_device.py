@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""adb helpers for the Quest build: find the headset, install, launch, logcat, push the developer data."""
+"""adb helpers for the Quest build: find the headset, install, launch, logcat."""
 import subprocess
 import sys
 from pathlib import Path
 
 ACTIVITY = "org.pagetable.diorama64/android.app.NativeActivity"
 LOG_TAG = "Diorama64"
-# The app's external files directory (Context.getExternalFilesDir(null), ANativeActivity::externalDataPath): adb can
-# write it and the app reads it without a storage permission.
-FILES_DIR = "/sdcard/Android/data/org.pagetable.diorama64/files"
-RES_DIRS = ("lang", "dynos", "palettes", "mods")
 
 
 def find_device(adb_devices_output: str) -> "str | None":
@@ -36,31 +32,6 @@ def install(apk: Path) -> None:
 
 def launch() -> None:
     subprocess.run(["adb", "-s", _serial(), "shell", "am", "start", "-n", ACTIVITY], check=True)
-
-
-def dev_data_plan(rom: Path, res_dir: Path, packs: "list[Path]") -> "list[tuple[Path, str]]":
-    """(local source, remote path) for each push: the ROM, the four resource folders sm64coopdx reads from res/, and
-    each pack folder under packs/<name>."""
-    plan = [(rom, f"{FILES_DIR}/rom.z64")]
-    plan += [(res_dir / d, f"{FILES_DIR}/res/{d}") for d in RES_DIRS]
-    plan += [(p, f"{FILES_DIR}/packs/{p.name}") for p in packs]
-    return plan
-
-
-def push_dev_data(rom: Path, res_dir: Path, packs: "list[Path]") -> None:
-    """Replaces each remote target whole (adb push of a folder onto an existing one would nest it), so files a previous
-    push left behind never linger. packs/ is emptied first, so only the packs listed now are seen by the app."""
-    plan = dev_data_plan(rom, res_dir, packs)
-    missing = [str(src) for src, _ in plan if not src.exists()]
-    if missing:
-        raise SystemExit("quest_device: missing developer data: " + ", ".join(missing))
-    serial = _serial()
-    shell = ["adb", "-s", serial, "shell"]
-    subprocess.run([*shell, "rm", "-rf", f"{FILES_DIR}/packs", f"{FILES_DIR}/rom.z64",
-                    *(f"{FILES_DIR}/res/{d}" for d in RES_DIRS)], check=True)
-    subprocess.run([*shell, "mkdir", "-p", f"{FILES_DIR}/res", f"{FILES_DIR}/packs"], check=True)
-    for src, remote in plan:
-        subprocess.run(["adb", "-s", serial, "push", str(src), remote], check=True)
 
 
 def logcat(pattern: "str | None" = None) -> None:

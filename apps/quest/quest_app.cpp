@@ -89,27 +89,20 @@ bool file_exists(const std::string &path) {
     return ::stat(path.c_str(), &st) == 0;
 }
 
-// The data the game reads: the bundled copy (internalDataPath/bundled, plan 3 Task 6: Bundled/rom.z64,
-// Bundled/packs, res/) when it has the ROM, else plan 2's adb push to the external files directory (rom.z64, res/,
-// packs/), until Task 6 removes that path.
+// The data the game reads: the bundled copy (internalDataPath/bundled, copied out of the APK's assets by main.cpp):
+// Bundled/rom.z64, Bundled/packs/<name>/ and res/{lang,dynos,palettes,mods}.
 struct DataDirs { std::string rom, res, packs, source; };
 DataDirs data_dirs() {
-    AppState &s = state();
     DataDirs d;
-    const std::string bundled_rom = ar::bundled_data(s.bundle, "rom.z64");
-    if (file_exists(bundled_rom) || !s.app || !s.app->activity->externalDataPath) {
-        d.rom = bundled_rom; d.res = s.bundle + "/res"; d.packs = ar::bundled_data(s.bundle, "packs"); d.source = "bundled";
-    } else {
-        const std::string ext = s.app->activity->externalDataPath;
-        d.rom = ext + "/rom.z64"; d.res = ext + "/res"; d.packs = ext + "/packs"; d.source = "external";
-    }
+    d.rom = ar::bundled_data(state().bundle, "rom.z64"); d.res = state().bundle + "/res";
+    d.packs = ar::bundled_data(state().bundle, "packs"); d.source = "bundled";
     return d;
 }
 const ar_adapter *pick_adapter(const std::string &game, const DataDirs &d, std::string *err) {
     if (game == "cube") return cube_adapter();
     if (game == "sm64") {
         if (!file_exists(d.res + "/lang/English.ini")) {
-            *err = "sm64 resources missing at " + d.res + " (no res/lang/English.ini; run quest_build.py --rom)";
+            *err = "sm64 resources missing at " + d.res + " (no res/lang/English.ini; rebuild the APK with quest_build.py)";
             return nullptr;
         }
         ar_adapter_sm64_set_resource_dir(d.res.c_str());   // before the game boots (0002-Library-seams-and-host-hooks.patch)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from quest_device import dev_data_plan, find_device  # noqa: E402
+from quest_device import find_device  # noqa: E402
 from quest_package import aapt2_link_cmd  # noqa: E402
 
 
@@ -28,12 +28,34 @@ class QuestScriptTests(unittest.TestCase):
     def test_aapt2_link_cmd_no_assets(self):
         self.assertNotIn("-A", aapt2_link_cmd("a", "m", "j", None, "o"))
 
-    def test_dev_data_plan(self):
-        plan = dev_data_plan(Path("/l/rom.z64"), Path("/b/us_pc"), [Path("/p/a"), Path("/p/b")])
-        self.assertEqual(plan[0], (Path("/l/rom.z64"), "/sdcard/Android/data/org.pagetable.diorama64/files/rom.z64"))
-        self.assertIn((Path("/b/us_pc/lang"), "/sdcard/Android/data/org.pagetable.diorama64/files/res/lang"), plan)
-        self.assertIn((Path("/p/b"), "/sdcard/Android/data/org.pagetable.diorama64/files/packs/b"), plan)
-        self.assertEqual(len(plan), 1 + 4 + 2)
+    def test_quest_bundle_assets_layout(self):
+        import json, tempfile
+        from unittest import mock
+        import bundle_local, quest_bundle
+        with tempfile.TemporaryDirectory() as t:
+            t = Path(t)
+            res = t / "us_pc"
+            for rel in ("lang/English.ini", "dynos/packs/a.bin", "palettes/p.pal", "mods/m/main.lua"):
+                (res / rel).parent.mkdir(parents=True, exist_ok=True)
+                (res / rel).write_text(rel)
+
+            def fake_stage(dest, names=None, **kw):
+                dest = Path(dest)
+                (dest / "packs" / "pk").mkdir(parents=True)
+                (dest / "rom.z64").write_bytes(b"rom")
+                (dest / "packs" / "pk" / "t.png").write_bytes(b"png")
+                return {"packs/pk/t.png": "bb", "rom.z64": "aa"}
+
+            out = t / "assets"
+            with mock.patch.object(bundle_local, "stage", fake_stage):
+                expected = quest_bundle.stage(out, ["pk"], res_dir=res)
+            self.assertEqual(expected, {"packs/pk/t.png": "bb", "rom.z64": "aa"})
+            self.assertEqual(json.loads((out / "Bundled" / "bundled.json").read_text()), {"files": expected})
+            listed = json.loads((out / "res" / "res.json").read_text())
+            self.assertEqual(sorted(listed), ["dynos/packs/a.bin", "lang/English.ini", "mods/m/main.lua",
+                                              "palettes/p.pal"])
+            for rel in listed:
+                self.assertTrue((out / "res" / rel).is_file())
 
 
 if __name__ == "__main__":

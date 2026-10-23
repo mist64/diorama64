@@ -49,6 +49,10 @@ def package(build_dir: Path, so_paths: list, assets_dir: "Path | None", out_apk:
     with zipfile.ZipFile(base, "a", zipfile.ZIP_DEFLATED) as z:
         for so in so_paths:
             z.write(so, f"lib/arm64-v8a/{Path(so).name}")
+        if assets_dir is not None:   # aapt2 link -A skips dotfiles (the packs' .sm64ar-verified stamps): add them here
+            for p in sorted(Path(assets_dir).rglob(".*")):
+                if p.is_file():
+                    z.write(p, "assets/" + p.relative_to(assets_dir).as_posix())
     subprocess.run([str(tools / "zipalign"), "-f", "-p", "4", str(base), str(aligned)], check=True)
     ks = _keystore(build_dir)
     subprocess.run([str(tools / "apksigner"), "sign", "--ks", str(ks), "--ks-pass", "pass:android",
