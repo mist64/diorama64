@@ -315,6 +315,8 @@ void QxSession::record_perf(int64_t display_ns, std::chrono::steady_clock::time_
         vos_log("AR_HITCH tick=%llu gap_ms=%.1f cpu_ms=%.1f step_ms=%.1f ticks=%u", (unsigned long long)ar_runtime_ticks_done(rt_),
                 gap_ms, cpu_ms, step_ms_, k);
     const RoomLightStatus ls = light_.status();
+    if (light_box_) light_box_->set(ls);
+    spatial_ok_.store(audio_ && audio_on_ && audio_->spatial(), std::memory_order_release);
     const bool flipped = (ls.room ? 1 : 0) != light_room_logged_;
     bool window = false;
     if (perf_.frames() >= 900) { log_perf_window(); window = true; }
@@ -491,6 +493,7 @@ void QxSession::stop() {
     // The stream is stopped and closed before the runtime goes: its callback never runs against a destroyed runtime.
     audio_.reset();
     audio_on_ = false;
+    spatial_ok_.store(false, std::memory_order_release);
     if (dev_) dev_->wait_idle();   // every completion has run (ended its runtime frame) before the runtime goes
     if (dev_ && rt_) {
         save_pipelines();

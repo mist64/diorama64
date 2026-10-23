@@ -63,6 +63,12 @@ public:
     // the panel is closed; the claim's MOVE / END / CANCEL follow whatever it returns at BEGIN (true: claimed). Before
     // start; empty (the default): no game pointer.
     void set_pointer_claim(PointerClaim claim) { claim_ = std::move(claim); }
+    // The game paused (no ticks, audio paused) while on: arvos_set_background. Any thread.
+    void set_paused(bool on) { platform_.set_paused(on); }
+    // Before start; the box outlives the session. The room light's status after every frame (arvos_room_light_get).
+    void set_room_light_status(RoomLightStatusBox *box) { light_box_ = box; }
+    // The game audio runs in spatial mode (SOURCES with the stream up); any thread (vos_session.h's audio_spatial).
+    bool audio_spatial() const { return spatial_ok_.load(std::memory_order_acquire); }
     bool panel_open() const { return panel_open_; }   // toggled by the left menu button (plan 3's panel)
     PointerOwner pointer_owner() const { return owner_; }
     LookSettings effective_look() const;
@@ -130,6 +136,8 @@ private:
     bool want_spatial_ = false;    // the game's last "sound" choice
     int resampler_now_ = -1;
     std::chrono::steady_clock::time_point choice_at_{};
+    RoomLightStatusBox *light_box_ = nullptr;
+    std::atomic<bool> spatial_ok_{false};
 };
 
 }

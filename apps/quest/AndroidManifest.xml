@@ -13,7 +13,7 @@
     <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService"/></intent>
     <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService"/></intent>
   </queries>
-  <application android:hasCode="false" android:label="Diorama64" android:extractNativeLibs="true">
+  <application android:hasCode="false" android:label="Diorama64" android:extractNativeLibs="true" android:debuggable="true">
     <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s"/>
     <activity android:name="android.app.NativeActivity" android:exported="true" android:launchMode="singleTask"
               android:screenOrientation="landscape"

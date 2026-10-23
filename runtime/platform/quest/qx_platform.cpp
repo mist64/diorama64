@@ -7,6 +7,7 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#include <atomic>
 #include <vector>
 #include "ar_runtime.h"
 #include "qx_convert.h"
@@ -99,6 +100,7 @@ struct QxPlatform::Impl {
     XrSessionState state = XR_SESSION_STATE_UNKNOWN;
     bool session_running = false;
     bool exit_requested = false;
+    std::atomic<bool> paused{false};   // set_paused: the game is told it is not focused (VosPlatform's background)
     bool resumed = false;
     float display_hz = 0.f;
 
@@ -953,7 +955,8 @@ int cb_get_preview(void *user, ar_preview *out) {
 
 ar_session_state cb_session_state(void *user) {
     Impl *m = static_cast<Impl *>(user);
-    return qx_session_state(m->state, m->exit_requested);
+    const ar_session_state st = qx_session_state(m->state, m->exit_requested);
+    return st == AR_SESSION_FOCUSED && m->paused.load() ? AR_SESSION_VISIBLE : st;
 }
 
 void cb_set_passthrough(void *user, int on) { static_cast<Impl *>(user)->set_passthrough(on != 0); }
@@ -1044,6 +1047,7 @@ void QxPlatform::request_scene_capture() {
     else m_->capture_pending = true;   // issued once the permission is granted
 }
 std::string QxPlatform::scene_hint() const { return m_->placer.hint(); }
+void QxPlatform::set_paused(bool on) { m_->paused.store(on); }
 bool QxPlatform::exiting() const { return m_->exit_requested || m_->app->destroyRequested; }
 
 }  // namespace ar

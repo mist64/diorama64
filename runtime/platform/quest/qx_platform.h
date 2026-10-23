@@ -41,6 +41,9 @@ public:
     void set_depth_written(bool written);   // before end_submission: false when the device left the depth image unwritten (no depth info is chained)
     void end_submission();                  // after the GPU work is submitted: release the swapchain image, xrEndFrame; a no-op when this frame had no xrBeginFrame (session not running)
     bool exiting() const;
+    // The game is paused (the session reports VISIBLE, not FOCUSED, so the runtime steps no ticks and the audio pauses)
+    // while on: arvos_set_background, as VosPlatform::set_background. Any thread.
+    void set_paused(bool on);
     const ar_frame_info &last_frame() const;   // what the last wait_frame (called by the runtime's begin_frame) returned
     // The Touch controllers' sample of the last wait_frame and of the one before it (zeroed while unfocused), and
     // whether anything but the aim poses changed between them. Render thread.
