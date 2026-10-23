@@ -15,6 +15,8 @@
 
 namespace qxapp {
 namespace {
+// Plain globals: everything here runs on the android_main thread (configure, startup, the frame loop and the panel
+// inside it); only the dirty flag is atomic. QxPrefs itself is thread-safe.
 std::unique_ptr<ar::QxPrefs> g_prefs;
 std::atomic<bool> g_dirty{false};
 std::chrono::steady_clock::time_point g_saved_at{};
@@ -239,7 +241,7 @@ void load_audio() {   // AudioModel.load
     for (const auto &b : before)
         if (!b.second.empty() && !g_prefs->has("audio." + b.first))
             ar::vos_log("AR_SETTING audio.%s=%s was the old default: now the new one (defaults_version %d)", b.first.c_str(),
-                        b.second.c_str(), g_prefs->get_int("audio.defaults_version", 0));
+                        b.second.c_str(), b.first == "ring_focus" ? 1 : 2);   // qx_migrate_audio_defaults' changes: 1 ring_focus, 2 music
     for (const auto &key : ar::audio_keys()) {
         const std::string def = text_of(arvos_audio_default, key);
         std::string value;

@@ -224,6 +224,7 @@ void QxSession::log_perf_window() {
         vos_log("AR_AUDIO running=%d frames=%llu missing=%llu trimmed=%llu", audio_->running() ? 1 : 0,
                 (unsigned long long)audio_->frames_out(), (unsigned long long)audio_->missing_in(),
                 (unsigned long long)audio_->trimmed_in());
+    if (perf_window_fn_) perf_window_fn_(perf_window_ctx_);
     perf_.reset();
 }
 

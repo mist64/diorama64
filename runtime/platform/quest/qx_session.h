@@ -63,8 +63,8 @@ public:
     // the panel is closed; the claim's MOVE / END / CANCEL follow whatever it returns at BEGIN (true: claimed). Before
     // start; empty (the default): no game pointer.
     void set_pointer_claim(PointerClaim claim) { claim_ = std::move(claim); }
-    // The game paused (no ticks, audio paused) while on: arvos_set_background. Any thread.
-    void set_paused(bool on) { platform_.set_paused(on); }
+    // Called after each AR_PERF window is logged (render thread), as VosSession's.
+    void set_perf_window_callback(void (*fn)(void *ctx), void *ctx) { perf_window_fn_ = fn; perf_window_ctx_ = ctx; }
     // Before start; the box outlives the session. The room light's status after every frame (arvos_room_light_get).
     void set_room_light_status(RoomLightStatusBox *box) { light_box_ = box; }
     // The game audio runs in spatial mode (SOURCES with the stream up); any thread (vos_session.h's audio_spatial).
@@ -137,6 +137,8 @@ private:
     int resampler_now_ = -1;
     std::chrono::steady_clock::time_point choice_at_{};
     RoomLightStatusBox *light_box_ = nullptr;
+    void (*perf_window_fn_)(void *) = nullptr;
+    void *perf_window_ctx_ = nullptr;
     std::atomic<bool> spatial_ok_{false};
 };
 

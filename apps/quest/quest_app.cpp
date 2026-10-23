@@ -73,7 +73,6 @@ struct AppState {
     std::unique_ptr<ar::QxSession> session;
     ar::LookStore look;
     ar::AudioStore audio;
-    std::atomic<int> feed_filter{-1};
     ar::RoomLightStatusBox light_status;
     std::atomic<ar::QxPlatform *> live{nullptr};
     std::atomic<bool> background{false};
@@ -217,13 +216,17 @@ extern "C" int arvos_configure(int argc, const char *const *argv, const char *bu
     if (s.opts.reset_placement) s.replace_pending = true;
     if (s.opts.fake_table == ar::FakeTable::on) s.fixed_table = true;
     log_unknown_game_set_keys();
+    // Open here, so arvos_quest_seed_look works between arvos_configure and qx_app_startup (which loads from it).
+    if (!qxapp::prefs()) qxapp::prefs_open(s.docs + "/prefs.json");
     apply_audio_to_game(s.audio.get());
     set_status("ready: game " + s.opts.game);
     return 1;
 }
 extern "C" int arvos_autostart(void) { return 1; }   // the Quest has no window: the table always opens
 extern "C" int arvos_lifecycle_test(double *, double *) { return 0; }
-extern "C" int arvos_hide_status(void) { return 0; }
+extern "C" int arvos_hide_status(void) {
+    return state().options_ok && (!state().opts.hold_ticks.empty() || state().opts.hide_status) ? 1 : 0;
+}
 extern "C" int arvos_status(char *buf, int cap) {
     if (!buf || cap <= 0) return 0;
     AppState &s = state();
@@ -278,10 +281,6 @@ extern "C" int arvos_game_setting_option(const char *key, char *buf, int cap) {
 }
 static bool has_levels() { return state().options_ok && state().opts.game == "sm64"; }
 static bool is_sm64_session() { return has_levels(); }
-static int sm64_resampler_choice() {
-    char v[16];
-    return ar_adapter_sm64_get_setting("resampler", v, sizeof v) && std::strcmp(v, "linear") == 0 ? 1 : 0;
-}
 extern "C" int arvos_sm64_setting_count(void) { return has_levels() ? ar_adapter_sm64_setting_count() : 0; }
 extern "C" int arvos_sm64_setting_key(int i, char *buf, int cap) {
     const char *k = has_levels() ? ar_adapter_sm64_setting_key(i) : nullptr;
@@ -300,8 +299,7 @@ static int apply_sm64_setting(const char *key, const char *value) {
         return 0;
     }
     ar::vos_log("AR_SETTING sm64.%s=%s", key, value);
-    if (!std::strcmp(key, "resampler") && state().feed_filter.load() >= 0)
-        state().feed_filter.store(std::strcmp(value, "linear") == 0 ? 1 : 0);
+    // resampler: QxSession polls the setting once a second (set_audio_choice), so no feed filter is kept here.
     return 1;
 }
 extern "C" int arvos_sm64_setting_set(const char *key, const char *value) {   // + SM64LookModel.set's save
@@ -549,6 +547,15 @@ extern "C" int arvos_look_option(const char *key, char *buf, int cap) {
     return last ? copy_out(*last, buf, cap) : 0;
 }
 static struct PackChoice { int on = 0; std::string name; bool set = false; } g_packs[3];
+static void log_pack_load_if_changed(void *) {
+    static double logged = 0;   // frame loop thread only
+    const double ms = ar_adapter_sm64_pack_load_ms();
+    if (ms == logged) return;
+    logged = ms;
+    uint64_t up = 0, peak = 0;
+    ar_adapter_sm64_texfifo_stats(&up, &peak);
+    ar::vos_log("AR_PACKS load_ms=%.1f tex_up_mb=%.1f tex_peak_mb=%.1f", ms, up / 1048576.0, peak / 1048576.0);
+}
 static void apply_packs(int only_kind = 0) {
     if (!has_levels()) return;
     const bool roomlit = state().look.get().roomlit;
@@ -750,7 +757,8 @@ extern "C" int arvos_quest_ui_tab(char *buf, int cap) {
         const std::string stored = qxapp::prefs()->get("ui.tab");
         for (const char *x : kTabs) if (stored == x) t = x;
     }
-    return copy_out(t ? t : "Level", buf, cap);
+    copy_out(t ? t : "Level", buf, cap);   // the default shown when none is stored
+    return t ? 1 : 0;
 }
 extern "C" void arvos_quest_set_ui_tab(const char *tab) {
     for (const char *x : kTabs) if (tab && std::strcmp(tab, x) == 0) { pref_set("ui.tab", x); return; }
@@ -773,7 +781,7 @@ static void poll_packs() {   // PacksModel.startPolling's refresh
 extern "C" int qx_app_startup(void) {
     AppState &s = state();
     if (!s.options_ok) { ar::vos_log("AR_ERROR startup skipped: %s", s.error.c_str()); return 0; }
-    qxapp::prefs_open(s.docs + "/prefs.json");
+    if (!qxapp::prefs()) qxapp::prefs_open(s.docs + "/prefs.json");   // normally opened by arvos_configure
     // ShellModel.loadGame has nothing to load here (arvos_game, arvos_has_draw_all_rooms are read by the panel).
     // ShellModel.loadSM64World:
     using namespace qxapp;
@@ -871,9 +879,9 @@ extern "C" void arvos_layer_run(void *) {
             s.session->set_look_store(&s.look);
             s.session->set_audio_store(&s.audio);
             s.session->set_room_light_status(&s.light_status);
-            s.feed_filter.store(is_sm64_session() ? sm64_resampler_choice() : -1);
             if (s.opts.game == "sm64") {
                 s.session->set_audio_choice(sm64_audio_choice);
+                s.session->set_perf_window_callback(log_pack_load_if_changed, nullptr);
                 s.session->set_key_light_callback([](void *, int on, const float d[3]) { ar_adapter_sm64_set_key_light(on, d); }, nullptr);
                 ar_adapter_sm64_set_normal_flags(ar::look_normal_flags(s.look.get()));
                 std::string lock;
