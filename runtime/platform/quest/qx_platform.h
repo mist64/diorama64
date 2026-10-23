@@ -11,7 +11,9 @@ struct android_app;
 namespace ar {
 
 struct QxVulkan { VkInstance instance; VkPhysicalDevice physical; VkDevice device; uint32_t queue_family; VkQueue queue;
-                  PFN_vkGetInstanceProcAddr get_instance_proc_addr; };
+                  PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+                  std::vector<std::string> device_extensions;   // what create_vulkan enabled (VulkanDeviceInit's contract)
+                  bool alpha_to_one = false; };
 using QxSwapchainImage = VulkanExternalImage;  // what ExternalView::color points at: the device's own type, no pun
 
 // The Quest platform: an OpenXR session on a Vulkan device (XR_KHR_vulkan_enable2), one stereo array swapchain and an

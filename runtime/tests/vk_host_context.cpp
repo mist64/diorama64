@@ -57,6 +57,7 @@ bool vk_host_create(VulkanDeviceInit *out, std::string *err) {
     features.depthClamp = VK_TRUE;
     features.samplerAnisotropy = VK_TRUE;
     features.fragmentStoresAndAtomics = VK_TRUE;
+    features.alphaToOne = have.alphaToOne;
     const float priority = 1.f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = family;
@@ -77,6 +78,8 @@ bool vk_host_create(VulkanDeviceInit *out, std::string *err) {
     out->queue_family = family;
     vkGetDeviceQueue(device, family, 0, &out->queue);
     out->get_instance_proc_addr = vkGetInstanceProcAddr;
+    out->device_extensions.assign(want.begin(), want.end());
+    out->alpha_to_one = have.alphaToOne == VK_TRUE;
     return true;
 }
 void vk_host_destroy(const VulkanDeviceInit &init) {

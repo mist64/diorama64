@@ -33,13 +33,14 @@ VkImageAspectFlags depth_aspects(VkFormat f) {
 // ---------------------------------------------------------------------------------------------------------------------
 VulkanDevice::VulkanDevice(const VulkanDeviceInit &init)
     : inst_(init.instance), phys_(init.physical), dev_(init.device), qfam_(init.queue_family), queue_(init.queue),
-      gipa_(init.get_instance_proc_addr), cache_path_(init.pipeline_cache_path) {
+      gipa_(init.get_instance_proc_addr), cache_path_(init.pipeline_cache_path), exts_(init.device_extensions),
+      alpha_to_one_(init.alpha_to_one) {
     glsl_compiler_init();   // before any compile, on this thread or the pool's
     ok_ = init_device();
     if (!ok_) vos_log("AR_VULKAN init failed: no render device");
-    else vos_log("AR_VULKAN device %s ready (ring alignment %llu, timestamps %d, samples %u, transient %d, dynamic cull %d)",
+    else vos_log("AR_VULKAN device %s ready (ring alignment %llu, timestamps %d, samples %u, transient %d, dynamic cull %d, alpha-to-one %d)",
                  props_.deviceName, (unsigned long long)ring_align_, timestamps_ ? 1 : 0, supported_samples(4, 1),
-                 memoryless_msaa() ? 1 : 0, set_cull_ ? 1 : 0);
+                 memoryless_msaa() ? 1 : 0, set_cull_ ? 1 : 0, alpha_to_one_ ? 1 : 0);
     done_thread_ = std::thread([this] { completion_loop(); });
     if (ok_) pool_.start([this](const vk::WarmJob &j) { return vk::build_warm(env_, j); });
 }
@@ -84,8 +85,8 @@ bool VulkanDevice::init_device() {
     }
     depth_sampled_ = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
     vkGetPhysicalDeviceFormatProperties(phys_, kPlaceholderDepth, &fp);
-    const bool depth_linear = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
-    if (!depth_linear) vos_log("AR_VULKAN D32_SFLOAT has no linear filtering here: the shadow compare sampler is nearest");
+    depth_linear_ = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    if (!depth_linear_) vos_log("AR_VULKAN D32_SFLOAT has no linear filtering here: the depth maps are sampled nearest");
     vkGetPhysicalDeviceFormatProperties(phys_, kColorFormat, &fp);
     storage_rgba8_ = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
 
@@ -119,16 +120,18 @@ bool VulkanDevice::init_device() {
     if (vkCreateSampler(dev_, &si, nullptr, &linear_clamp_) != VK_SUCCESS) return false;
     si.magFilter = si.minFilter = VK_FILTER_NEAREST;
     if (vkCreateSampler(dev_, &si, nullptr, &nearest_) != VK_SUCCESS) return false;
-    si.magFilter = si.minFilter = depth_linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    si.magFilter = si.minFilter = depth_linear_ ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     si.compareEnable = VK_TRUE;
     si.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     if (vkCreateSampler(dev_, &si, nullptr, &compare_sampler_) != VK_SUCCESS) return false;
     if (!make_layouts()) return false;
 
-    // VK_KHR_create_renderpass2 (and with it VK_KHR_depth_stencil_resolve: the Quest platform and the host tests enable
-    // both or neither) and VK_EXT_extended_dynamic_state: enabled when the device returns their commands
-    create_rp2_ = (PFN_vkCreateRenderPass2KHR)vkGetDeviceProcAddr(dev_, "vkCreateRenderPass2KHR");
-    set_cull_ = (PFN_vkCmdSetCullModeEXT)vkGetDeviceProcAddr(dev_, "vkCmdSetCullModeEXT");
+    // the extensions the creator enabled (VulkanDeviceInit::device_extensions)
+    if (has_ext(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME))
+        create_rp2_ = (PFN_vkCreateRenderPass2KHR)vkGetDeviceProcAddr(dev_, "vkCreateRenderPass2KHR");
+    if (has_ext(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME))
+        set_cull_ = (PFN_vkCmdSetCullModeEXT)vkGetDeviceProcAddr(dev_, "vkCmdSetCullModeEXT");
+    env_.alpha_to_one = alpha_to_one_;
     env_.dev = dev_;
     env_.cache = cache_;
     env_.layout = pipe_layout_;
@@ -151,18 +154,13 @@ void VulkanDevice::detect_msaa(bool any_depth_mode) {
                                                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, &ip) == VK_SUCCESS)
         sample_counts_ &= ip.sampleCounts;
     depth_resolve_ = stencil_resolve_ = VK_RESOLVE_MODE_NONE;
-    bool has_ext = false;
-    uint32_t n = 0;
-    vkEnumerateDeviceExtensionProperties(phys_, nullptr, &n, nullptr);
-    std::vector<VkExtensionProperties> exts(n);
-    if (n) vkEnumerateDeviceExtensionProperties(phys_, nullptr, &n, exts.data());
-    for (const VkExtensionProperties &e : exts) has_ext = has_ext || std::strcmp(e.extensionName, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME) == 0;
+    const bool dsr_ext = has_ext(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME);
     PFN_vkGetPhysicalDeviceProperties2 props2 = nullptr;
     if (gipa_) {
         props2 = (PFN_vkGetPhysicalDeviceProperties2)gipa_(inst_, "vkGetPhysicalDeviceProperties2");
         if (!props2) props2 = (PFN_vkGetPhysicalDeviceProperties2)gipa_(inst_, "vkGetPhysicalDeviceProperties2KHR");
     }
-    if (create_rp2_ && has_ext && props2) {
+    if (create_rp2_ && dsr_ext && props2) {
         VkPhysicalDeviceDepthStencilResolveProperties dsr{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES};
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
         p2.pNext = &dsr;
@@ -185,6 +183,10 @@ void VulkanDevice::detect_msaa(bool any_depth_mode) {
     if (!depth_resolve_ && !logged) { vos_log("AR_VULKAN depth_resolve=0"); logged = true; }
     for (uint32_t s : {2u, 4u})
         if (depth_resolve_ && (sample_counts_ & s) && !env_.rp[s]) env_.rp[s] = target_pass(s, true, false);
+}
+bool VulkanDevice::has_ext(const char *name) const {
+    for (const std::string &e : exts_) if (e == name) return true;
+    return false;
 }
 void VulkanDevice::accept_any_depth_resolve() {
     if (ok_ && !depth_resolve_) detect_msaa(true);
@@ -846,7 +848,7 @@ VkDescriptorSet VulkanDevice::texture_set(const VkImageView tex[2], const VkSamp
     if (!s) return VK_NULL_HANDLE;
     const VkImageLayout rd = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     const VkDescriptorImageInfo ii[8] = {
-        {samp[0], tex[0], rd}, {samp[1], tex[1], rd}, {compare_sampler_, depth_ph_.view, rd}, {linear_clamp_, depth_ph_.view, rd},
+        {samp[0], tex[0], rd}, {samp[1], tex[1], rd}, {compare_sampler_, depth_ph_.view, rd}, {depth_linear_ ? linear_clamp_ : nearest_, depth_ph_.view, rd},
         {linear_clamp_, ao_ph_.view, rd}, {linear_clamp_, env_ph_.view, rd}, {linear_clamp_, env_ph_.view, rd}, {nearest_, depth_ph_.view, rd}};
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     w.dstSet = s;
@@ -962,7 +964,7 @@ VkPipeline VulkanDevice::resolve_pipeline(VkRenderPass rp, bool depth, bool *pen
     VkPipelineCache cache = cache_;
     VkPipelineLayout layout = resolve_layout_;
     VkShaderModule vs = resolve_vs_, fs = depth ? resolve_fs_depth_ : resolve_fs_;
-    if (!async_) return resolve_pipes_[key] = vk::make_resolve_pipeline(dev, cache, layout, rp, vs, fs, depth);
+    if (!async_) { built_since_save_++; return resolve_pipes_[key] = vk::make_resolve_pipeline(dev, cache, layout, rp, vs, fs, depth); }
     auto jt = resolve_jobs_.find(key);
     if (jt == resolve_jobs_.end())
         jt = resolve_jobs_.emplace(key, std::async(std::launch::async, [=] { return vk::make_resolve_pipeline(dev, cache, layout, rp, vs, fs, depth); })
@@ -970,6 +972,7 @@ VkPipeline VulkanDevice::resolve_pipeline(VkRenderPass rp, bool depth, bool *pen
     if (jt->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { *pending = true; return VK_NULL_HANDLE; }
     VkPipeline ps = jt->second.get();
     resolve_jobs_.erase(jt);
+    built_since_save_++;
     return resolve_pipes_[key] = ps;
 }
 

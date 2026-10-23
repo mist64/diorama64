@@ -240,6 +240,7 @@ const vk::FixedPipes &VulkanDevice::fixed_pipes() {
         fixed_ = fixed_job_.valid() ? fixed_job_.get() : vk::make_fixed_pipelines(dev_, cache_, fixed_layouts_);
         fixed_job_ = std::shared_future<vk::FixedPipes>();
         fixed_taken_ = true;
+        built_since_save_++;
     }
     return fixed_;
 }

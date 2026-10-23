@@ -257,6 +257,9 @@ private:
     VkQueue queue_;
     PFN_vkGetInstanceProcAddr gipa_;
     std::string cache_path_;
+    std::vector<std::string> exts_;   // the extensions the creator enabled
+    bool alpha_to_one_ = false;
+    bool has_ext(const char *name) const;
     bool ok_ = false;
     vk::Memory res_;
     VkPhysicalDeviceProperties props_{};
@@ -264,6 +267,7 @@ private:
     bool timestamps_ = false;
     uint64_t timestamp_mask_ = ~0ull;
     bool depth_sampled_ = false;
+    bool depth_linear_ = false;    // D32_SFLOAT filters linearly: else every depth map is sampled nearest
     bool storage_rgba8_ = false;   // RGBA8 storage images: the gamma mip kernel writes the textures' levels
     bool depth_sample_warned_ = false;
     // multisampling

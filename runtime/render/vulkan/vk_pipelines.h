@@ -91,6 +91,7 @@ struct BuildEnv {
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkRenderPass rp[5] = {};   // by sample count (1, 2, 4): a compatible pass
     bool dynamic_cull = false;
+    bool alpha_to_one = false;   // the alphaToOne feature is enabled: set with alpha-to-coverage
 };
 // A draw's combiner shaders (emit_glsl + compile_glsl). refused: the GLSL or the driver failed, not a combiner the
 // renderer cannot draw (unsupported).

@@ -207,6 +207,7 @@ VkPipeline VulkanDevice::mip_pipeline_if_ready() {
         mip_pipe_ = mip_job_.get();
         mip_taken_ = true;
         mip_job_ = std::shared_future<VkPipeline>();
+        built_since_save_++;
     }
     if (!mip_pipe_ && !mip_failed_) { mip_failed_ = true; late_gamma_.clear(); }
     return mip_pipe_;

@@ -8,12 +8,18 @@
 #pragma once
 #include <memory>
 #include <string>
+#include <vector>
 #include <vulkan/vulkan.h>
 #include "render_device.h"
 namespace ar {
 // The same fields as QxVulkan (qx_platform.h), plus where the pipeline cache lives ("" = no file).
+// The creator of the VkDevice states what it enabled: device_extensions, every extension it enabled (the device uses
+// VK_KHR_create_renderpass2 + VK_KHR_depth_stencil_resolve for multisample depth resolves and
+// VK_EXT_extended_dynamic_state for a dynamic cull mode only when listed here); alpha_to_one, the alphaToOne feature
+// (enable it when the physical device offers it: alpha-to-coverage pipelines then also set alpha-to-one, as Metal).
 struct VulkanDeviceInit { VkInstance instance; VkPhysicalDevice physical; VkDevice device; uint32_t queue_family; VkQueue queue;
-                          PFN_vkGetInstanceProcAddr get_instance_proc_addr; std::string pipeline_cache_path; };
+                          PFN_vkGetInstanceProcAddr get_instance_proc_addr; std::string pipeline_cache_path;
+                          std::vector<std::string> device_extensions = {}; bool alpha_to_one = false; };
 // What ExternalView::color (and ::depth) point at. view is the image's 2D_ARRAY view. The
 // image is in COLOR_ATTACHMENT_OPTIMAL (a depth image: DEPTH_STENCIL_ATTACHMENT_OPTIMAL) when encode_resolve records and
 // is left in it.

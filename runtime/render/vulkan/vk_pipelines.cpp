@@ -371,7 +371,8 @@ VkPipeline make_draw_pipeline(const BuildEnv &env, VkShaderModule vs, VkShaderMo
     rs.lineWidth = 1.f;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = (VkSampleCountFlagBits)samples;
-    ms.alphaToCoverageEnable = k.a2c ? VK_TRUE : VK_FALSE;   // (Metal also sets alpha-to-one: an optional Vulkan feature)
+    ms.alphaToCoverageEnable = k.a2c ? VK_TRUE : VK_FALSE;
+    ms.alphaToOneEnable = k.a2c && env.alpha_to_one ? VK_TRUE : VK_FALSE;   // Metal sets both (an optional Vulkan feature)
     VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     ds.depthTestEnable = VK_TRUE;   // ALWAYS when not testing: Metal's Always still writes when writes are on
     ds.depthWriteEnable = (state & 8u) ? VK_TRUE : VK_FALSE;

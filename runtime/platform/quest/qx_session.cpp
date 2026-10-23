@@ -41,7 +41,7 @@ bool QxSession::start(const std::string &rom_path, const std::string &save_dir, 
     const QxVulkan &vk = platform_.vulkan();
     if (vk.device == VK_NULL_HANDLE) return fail("no Vulkan device (the platform did not start)");
     VulkanDeviceInit init{vk.instance, vk.physical, vk.device, vk.queue_family, vk.queue, vk.get_instance_proc_addr,
-                          files_dir_ + "/pipelines.vkcache"};
+                          files_dir_ + "/pipelines.vkcache", vk.device_extensions, vk.alpha_to_one};
     dev_ = create_vulkan_device(init);
     if (!dev_) return fail("Vulkan render device creation failed");
     renderer_.reset(new Renderer(*dev_));

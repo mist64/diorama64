@@ -280,6 +280,7 @@ bool QxPlatform::Impl::create_vulkan(std::string *err) {
     features.depthClamp = VK_TRUE;
     features.samplerAnisotropy = VK_TRUE;
     features.fragmentStoresAndAtomics = VK_TRUE;
+    features.alphaToOne = have.alphaToOne;   // alpha-to-coverage pipelines also set alpha-to-one (as Metal) when offered
 
     const float priority = 1.f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -300,6 +301,8 @@ bool QxPlatform::Impl::create_vulkan(std::string *err) {
     if (!ok(ext.create_vulkan_device(instance, &xd, &vk.device, &vr), "xrCreateVulkanDeviceKHR", err)) return false;
     if (vr != VK_SUCCESS) return fail("xrCreateVulkanDeviceKHR", "VkResult " + std::to_string((int)vr), err);
     vkGetDeviceQueue(vk.device, vk.queue_family, 0, &vk.queue);
+    vk.device_extensions.assign(dev_want.begin(), dev_want.end());
+    vk.alpha_to_one = have.alphaToOne == VK_TRUE;
     return true;
 }
 
