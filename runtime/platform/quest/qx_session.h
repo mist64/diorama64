@@ -19,6 +19,8 @@ extern "C" {
 }
 #include "ar_audio_settings.h"
 #include "look.h"
+#include "panel_model.h"
+#include "panel_place.h"
 #include "qx_audio.h"
 #include "qx_platform.h"
 #include "render_device.h"
@@ -29,6 +31,7 @@ extern "C" {
 #include "vos_state.h"
 
 namespace ar {
+namespace panel { class Raster; }
 
 class QxSession {
 public:
@@ -69,7 +72,13 @@ public:
     void set_room_light_status(RoomLightStatusBox *box) { light_box_ = box; }
     // The game audio runs in spatial mode (SOURCES with the stream up); any thread (vos_session.h's audio_spatial).
     bool audio_spatial() const { return spatial_ok_.load(std::memory_order_acquire); }
-    bool panel_open() const { return panel_open_; }   // toggled by the left menu button (plan 3's panel)
+    bool panel_open() const { return panel_.open; }   // toggled by the left menu button
+    // The settings panel's calls into the app (arvos_* behind std::functions); before the first frame. The panel's tab
+    // is read and stored through it as "ui.tab".
+    void set_panel_bridge(const panel::Bridge &b) { bridge_ = b; }
+    // The panel's texture id: below the renderer's own ids (0xFFFFFF00 and up), never an adapter's.
+    static constexpr uint32_t kPanelTexture = 0xFFFFFE01u;
+    static constexpr float kPanelWidthM = 0.6f;
     PointerOwner pointer_owner() const { return owner_; }
     LookSettings effective_look() const;
     void apply_tex_filter();   // the look's edge_aa and tex_smooth onto the device, when they changed
@@ -78,6 +87,11 @@ private:
     LightingFrame update_lighting(const ar_render_frame &rf);
     void step_ticks();
     void update_pointer(const ar_render_frame &rf);
+    void open_panel();
+    void close_panel();
+    void update_panel(const ar_render_frame &rf, float dt_s);
+    void apply_panel_action(const panel::Action &a);
+    void draw_panel(const ar_render_frame &rf);
     bool pointer_event(PointerEvent::Phase phase, const ar_render_frame &rf);
     void cancel_game_pointer(const ar_render_frame &rf);
     void warm_pipelines(uint32_t samples);
@@ -123,7 +137,21 @@ private:
     bool game_live_ = false;           // a BEGIN was claimed: an END or CANCEL is still owed
     uint64_t pointer_id_ = 0;
     float ray_o_[3] = {0.f, 0.f, 0.f}, ray_d_[3] = {0.f, 0.f, -1.f};   // the last valid right aim ray, tracking space
-    bool panel_open_ = false;
+    // The settings panel (render thread): open while toggled by the menu button. While open it owns the right trigger
+    // and the right stick X on a hovered slider; tabs_ is rebuilt from the bridge every frame and the texture re-drawn
+    // (at most once a frame) when what it shows changed.
+    struct PanelState { bool open = false; int tab = 0; int scroll_rows = 0; panel::Hit hover; bool dirty = true; };
+    PanelState panel_;
+    panel::Bridge bridge_;
+    panel::Layout layout_;
+    std::vector<panel::Tab> tabs_;
+    std::unique_ptr<panel::Raster> raster_;
+    panel::PanelPose pose_{};
+    bool pose_ok_ = false, aim_ok_ = false, aim_hit_ = false;
+    float aim_o_[3] = {0.f, 0.f, 0.f}, aim_d_[3] = {0.f, 0.f, -1.f}, aim_end_[3] = {0.f, 0.f, 0.f};
+    std::string panel_sig_;
+    std::string slide_id_, slide_sent_;   // the slider the stick is moving (its last value sent, not yet final)
+    float slide_raw_ = 0.f, scroll_acc_ = 0.f;
     // Game audio (render thread), running whenever the game runs, as visionOS's (the game's own "audio" setting mutes
     // inside the game). audio_on_: the stream started; audio_focus_: the last session focus applied to it (pause when
     // leaving FOCUSED, resume on return).

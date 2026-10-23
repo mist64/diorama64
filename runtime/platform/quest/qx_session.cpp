@@ -5,12 +5,15 @@
 #include "qx_session.h"
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "ar_layer.h"
 #include "ar_mem_stats.h"
 #include "lighting.h"
+#include "panel_raster.h"
 #include "pipeline_warm.h"
 #include "qx_lighting.h"
 #include "room_light.h"
@@ -53,6 +56,24 @@ bool write_text(const std::string &path, const std::string &text) {
 double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
+// The settings panel's quad: its texture as is (TEXEL0 colour and alpha), blended, depth-tested, never writing depth.
+DrawPacket panel_packet() {
+    DrawPacket p{};
+    p.vertex_count = 6;
+    p.cc = normalize_combiner(fc_combiner_key{((uint64_t)FC_SRC_TEXEL0 << 12) | ((uint64_t)FC_SRC_TEXEL0 << 28), (uint32_t)FC_CC_ALPHA, 0});
+    p.tex[0] = QxSession::kPanelTexture;
+    p.samp[0] = fc_sampler{1, FC_WRAP_CLAMP, FC_WRAP_CLAMP, 0};
+    p.depth_test = 1; p.depth_write = 0; p.blend = 1; p.cull = FC_CULL_NONE;
+    return p;
+}
+// The renderer's fixed draws plus the panel's, for the background warm-ups.
+std::vector<DrawPacket> fixed_draws() {
+    std::vector<DrawPacket> v = Renderer::fixed_pipeline_draws();
+    v.push_back(panel_packet());
+    return v;
+}
+constexpr const char *kPanelFont = "/system/fonts/Roboto-Regular.ttf";
+constexpr float kStickDeadZone = 0.2f;
 }  // namespace
 
 QxSession::QxSession(const ar_adapter *a, QxPlatform &p, const std::string &files_dir)
@@ -195,7 +216,7 @@ void QxSession::warm_pipelines(uint32_t samples) {
 }
 void QxSession::warm_in_background(uint32_t samples) {
     const size_t n = dev_->warm_pipelines_background(merge_pipeline_lists(pipeline_file_, dev_->pipeline_list()),
-                                                     Renderer::fixed_pipeline_draws(), samples);
+                                                     fixed_draws(), samples);
     vos_log("AR_WARMUP background=%zu samples=%u", n, samples);
 }
 
@@ -277,9 +298,10 @@ void QxSession::cancel_game_pointer(const ar_render_frame &rf) {
 void QxSession::update_pointer(const ar_render_frame &rf) {
     const QxActionState &now = platform_.actions(), &before = platform_.actions_before();
     if (now.menu && !before.menu) {
-        panel_open_ = !panel_open_;
-        vos_log("AR_PANEL toggle open=%d", panel_open_ ? 1 : 0);
-        if (panel_open_) cancel_game_pointer(rf);
+        if (panel_.open) close_panel();
+        else open_panel();
+        vos_log("AR_PANEL toggle open=%d", panel_.open ? 1 : 0);
+        if (panel_.open) cancel_game_pointer(rf);
     }
     if (!platform_.input_focused()) {
         cancel_game_pointer(rf);
@@ -297,11 +319,183 @@ void QxSession::update_pointer(const ar_render_frame &rf) {
     }
     if (d.owner == PointerOwner::game && d.begin) {
         pointer_id_++;
-        game_live_ = claim_ && !panel_open_ && rf.table_valid && pointer_event(PointerEvent::begin, rf);
+        game_live_ = claim_ && !panel_.open && rf.table_valid && pointer_event(PointerEvent::begin, rf);
     } else if (d.owner == PointerOwner::game && game_live_) {
-        if (panel_open_) cancel_game_pointer(rf);
+        if (panel_.open) cancel_game_pointer(rf);
         else pointer_event(PointerEvent::move, rf);
     }
+}
+
+// ---- The settings panel ----
+void QxSession::open_panel() {
+    panel_.open = true;
+    panel_.scroll_rows = 0;
+    panel_.hover = panel::Hit{};
+    panel_.dirty = true;
+    pose_ok_ = false;
+    panel_sig_.clear();
+    tabs_ = panel::build_tabs(bridge_);
+    const std::string want = bridge_.get ? bridge_.get("ui.tab") : std::string();
+    panel_.tab = 0;
+    for (size_t i = 0; i < tabs_.size(); i++) if (tabs_[i].name == want) panel_.tab = (int)i;
+    if (!raster_) {
+        raster_.reset(new panel::Raster(layout_.width, layout_.height));
+        const bool font = raster_->load_font(kPanelFont);
+        vos_log("AR_PANEL font=%s", font ? kPanelFont : "builtin 5x7");
+    }
+    vos_log("AR_PANEL open tab=%s tabs=%zu", tabs_.empty() ? "-" : tabs_[(size_t)panel_.tab].name.c_str(), tabs_.size());
+}
+
+void QxSession::close_panel() {
+    if (!slide_id_.empty() && bridge_.set) bridge_.set(slide_id_, slide_sent_, true);   // a slide in progress ends final
+    slide_id_.clear();
+    panel_.open = false;
+    aim_ok_ = aim_hit_ = false;
+}
+
+void QxSession::apply_panel_action(const panel::Action &a) {
+    switch (a.kind) {
+    case panel::Action::select_tab:
+        if (a.tab < 0 || a.tab >= (int)tabs_.size()) return;
+        panel_.tab = a.tab;
+        panel_.scroll_rows = 0;
+        if (bridge_.set) bridge_.set("ui.tab", a.value, true);
+        vos_log("AR_PANEL tab=%s", a.value.c_str());
+        return;
+    case panel::Action::set:
+        if (!bridge_.set) return;
+        if (!a.final) {   // the stick slides: values go live, the final one when the stick lets go or the ray leaves
+            if (slide_id_ != a.id) { slide_id_ = a.id; slide_sent_.clear(); }
+            slide_raw_ = a.raw;
+            if (a.value != slide_sent_) { bridge_.set(a.id, a.value, false); slide_sent_ = a.value; }
+            return;
+        }
+        bridge_.set(a.id, a.value, true);
+        vos_log("AR_PANEL set %s=%s", a.id.c_str(), a.value.c_str());
+        return;
+    case panel::Action::press:
+        vos_log("AR_PANEL press %s", a.id.c_str());
+        if (bridge_.press) bridge_.press(a.id);
+        return;
+    case panel::Action::scroll:
+        panel_.scroll_rows += a.delta;
+        return;
+    case panel::Action::none: return;
+    }
+}
+
+// After update_pointer (which toggles the panel): the quad's pose, the right aim ray's hit on it, the hovered control,
+// the trigger's rising edge and the right stick X acted on, and whether the texture must be re-drawn.
+void QxSession::update_panel(const ar_render_frame &rf, float dt_s) {
+    if (!panel_.open) return;
+    tabs_ = panel::build_tabs(bridge_);
+    if (tabs_.empty()) return;
+    panel_.tab = std::min(std::max(panel_.tab, 0), (int)tabs_.size() - 1);
+    // Over a placed table the panel follows the level and turns to the head; without one it stays where it opened.
+    if (rf.table_valid || !pose_ok_) {
+        pose_ = panel::place_panel(rf, kPanelWidthM, (float)layout_.width / (float)layout_.height);
+        pose_ok_ = true;
+    }
+    const QxActionState &now = platform_.actions(), &before = platform_.actions_before();
+    const bool focused = platform_.input_focused();
+    panel::Hit hit;
+    aim_ok_ = focused && now.right_aim_valid;
+    aim_hit_ = false;
+    if (aim_ok_) {
+        const float fwd[3] = {0.f, 0.f, -1.f};   // OpenXR's aim pose points down its -Z
+        for (int k = 0; k < 3; k++) aim_o_[k] = now.right_aim.pos[k];
+        ar_quat_rotate(now.right_aim.quat, fwd, aim_d_);
+        float u = 0.f, v = 0.f;
+        if (panel::ray_hit_panel(pose_, aim_o_, aim_d_, &u, &v)) {
+            aim_hit_ = true;
+            panel::panel_point(pose_, u, v, aim_end_);
+            hit = panel::hit_test(tabs_, panel_.tab, layout_, u, v, panel_.scroll_rows);
+        } else {
+            for (int k = 0; k < 3; k++) aim_end_[k] = aim_o_[k] + aim_d_[k];   // 1 m along the ray
+        }
+    }
+    panel_.hover = hit;
+    const bool trigger = focused && now.rt > 0.5f && !(before.rt > 0.5f);
+    if (trigger && aim_hit_) platform_.hold_until_released(AR_BTN_RB);   // the pull is the panel's, not the game's R
+    std::vector<panel::Control> *cs = hit.tab == panel_.tab && hit.control >= 0 ? &tabs_[(size_t)panel_.tab].controls : nullptr;
+    panel::Control *c = cs ? &(*cs)[(size_t)hit.control] : nullptr;
+    float sx = focused && std::fabs(now.rx) >= kStickDeadZone ? now.rx : 0.f;
+    if (!c || c->kind != panel::Kind::slider) sx = 0.f;   // the stick X belongs to a hovered slider only
+    if (!slide_id_.empty() && (sx == 0.f || !c || c->id != slide_id_)) {
+        if (bridge_.set) bridge_.set(slide_id_, slide_sent_, true);
+        vos_log("AR_PANEL set %s=%s", slide_id_.c_str(), slide_sent_.c_str());
+        slide_id_.clear();
+    }
+    if (c && c->id == slide_id_) {   // continue from the unrounded value, so a slow push accumulates
+        char b[32];
+        std::snprintf(b, sizeof b, "%.7g", (double)slide_raw_);
+        c->value = b;
+    }
+    apply_panel_action(panel::act_on(tabs_, panel_.tab, hit, trigger, sx, dt_s));
+    // The right stick Y scrolls the rows while the ray is on the panel.
+    if (aim_hit_ && std::fabs(now.ry) >= 0.5f) {
+        scroll_acc_ -= now.ry * 10.f * dt_s;
+        const int whole = (int)scroll_acc_;
+        panel_.scroll_rows += whole;
+        scroll_acc_ -= (float)whole;
+    } else {
+        scroll_acc_ = 0.f;
+    }
+    if (panel_.tab >= (int)tabs_.size()) return;
+    panel_.scroll_rows = std::min(std::max(panel_.scroll_rows, 0), panel::max_scroll(tabs_, panel_.tab, layout_));
+    // What the texture shows, as one string: re-drawn when it changes.
+    std::string sig = std::to_string(panel_.tab) + '|' + std::to_string(panel_.scroll_rows) + '|' + std::to_string(hit.tab) + ',' +
+                      std::to_string(hit.control) + ',' + std::to_string(hit.scroll) + ',' + (hit.tab_strip ? "t" : "") + '|';
+    sig += (bridge_.status ? bridge_.status() : std::string()) + '|' + (bridge_.hint ? bridge_.hint() : std::string()) + '|';
+    for (const panel::Control &x : tabs_[(size_t)panel_.tab].controls)
+        sig += x.label + '\x1f' + x.value + '\x1f' + x.note + '\x1f' + (x.enabled ? '1' : '0') + '\x1e';
+    if (sig != panel_sig_) {
+        panel_sig_.swap(sig);
+        panel_.dirty = true;
+    }
+}
+
+// After the AR layer, into the same layered target: one pass per eye (layer = eye) that neither clears nor writes depth,
+// then the controller ray.
+void QxSession::draw_panel(const ar_render_frame &rf) {
+    if (!panel_.open || !pose_ok_ || rf.view_count == 0 || !raster_) return;
+    if (panel_.dirty) {
+        const std::string status = bridge_.status ? bridge_.status() : std::string();
+        const std::string hint = bridge_.hint ? bridge_.hint() : std::string();
+        raster_->draw(tabs_, panel_.tab, panel_.hover, layout_, panel_.scroll_rows, status, hint);
+        dev_->upload_texture(kPanelTexture, raster_->width(), raster_->height(), raster_->rgba());
+        panel_.dirty = false;
+    }
+    const float hw = 0.5f * pose_.width_m, hh = 0.5f * pose_.height_m;
+    const float c[4][2] = {{-hw, -hh}, {hw, -hh}, {hw, hh}, {-hw, hh}};
+    const float uv[4][2] = {{0.f, 1.f}, {1.f, 1.f}, {1.f, 0.f}, {0.f, 0.f}};
+    const int idx[6] = {0, 1, 2, 0, 2, 3};
+    fc_vertex q[6] = {};
+    for (int k = 0; k < 6; k++) {
+        q[k].pos[0] = c[idx[k]][0]; q[k].pos[1] = c[idx[k]][1];
+        q[k].uv0[0] = uv[idx[k]][0]; q[k].uv0[1] = uv[idx[k]][1];
+        for (int ch = 0; ch < 4; ch++) q[k].shade[ch] = 255;
+    }
+    const DrawPacket p = panel_packet();
+    const ar_mat4 tracking_from_panel = ar_mat4_from_pose(pose_.tracking_from_panel);
+    const Viewport vp{0.f, 0.f, float(platform_.swapchain_width()), float(platform_.swapchain_height())};
+    FrameView tracking[AR_MAX_VIEWS];
+    for (uint32_t i = 0; i < rf.view_count; i++) {
+        ViewConstants vc{};
+        const ar_mat4 cm = ar_mat4_mul(rf.views[i].clip_from_tracking, tracking_from_panel);
+        std::memcpy(vc.clip_from_model, cm.m, sizeof vc.clip_from_model);
+        vc.layer = i;
+        PassDesc pd{};
+        pd.clear = false;   // over the AR layer drawn this frame
+        pd.depth = true;
+        pd.viewport = vp;
+        dev_->encode_pass(target_, pd, vc, q, 6, &p, 1);
+        tracking[i] = FrameView{rf.views[i].clip_from_tracking, {0.f, 0.f, 0.f}, vp, {0.f, 0.f, 0.f}, i};
+    }
+    if (!aim_ok_) return;
+    PreviewLine ray{{aim_o_[0], aim_o_[1], aim_o_[2], aim_end_[0], aim_end_[1], aim_end_[2]}, {255, 255, 255, 153}, 0.004f};
+    const ar_pose head = ar_pose_mul(rf.tracking_from_table, rf.head_table);
+    renderer_->draw_lines(target_, std::vector<PreviewLine>{ray}, tracking, rf.view_count, head.pos);
 }
 
 void QxSession::step_ticks() { vos_step_due_ticks(rt_, hold_.limit(), nullptr, nullptr); }
@@ -388,6 +582,8 @@ bool QxSession::frame() {
     table_valid_ = rf.table_valid != 0;
     const LightingFrame lf = update_lighting(rf);       // before step_ticks: this frame's ticks already use the steering
     update_pointer(rf);
+    const float frame_dt = have_time_ ? std::min(0.1f, std::max(0.f, float(rf.display_time_ns - last_time_) * 1e-9f)) : 1.f / 90.f;
+    update_panel(rf, frame_dt);
     update_audio(rf);
     // The ticks stepped below read this frame's head but are first shown by the next frame; the view matrices always
     // use the current head.
@@ -408,7 +604,7 @@ bool QxSession::frame() {
         if (msaa_warming_ != samples) {
             msaa_warming_ = samples;
             const size_t n = dev_->warm_pipelines_background(merge_pipeline_lists(pipeline_file_, dev_->pipeline_list()),
-                                                             Renderer::fixed_pipeline_draws(), samples);
+                                                             fixed_draws(), samples);
             vos_log("AR_WARMUP samples=%u background=%zu (applies once built)", samples, n);
         }
         if (dev_->pipelines_warming() > 0) samples = samples_;
@@ -453,6 +649,7 @@ bool QxSession::frame() {
     }
     dev_->begin_frame();
     draw_ar_layer(*renderer_, target_, rf, lo, dt);   // the table-shadow box and set_fine_textures are inside
+    draw_panel(rf);
     bool resolved = true;
     for (uint32_t i = 0; i < rf.view_count; i++) {
         ExternalView ev{};
@@ -510,6 +707,8 @@ void QxSession::stop() {
     owner_ = PointerOwner::none;
     if (rt_) ar_runtime_destroy(rt_);
     rt_ = nullptr;
+    if (panel_.open) close_panel();
+    panel_.dirty = true;   // a new device needs the texture again
     renderer_.reset();
     dev_.reset();
     target_ = w_ = h_ = layers_ = samples_ = 0;

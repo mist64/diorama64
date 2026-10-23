@@ -35,6 +35,7 @@
 #include "ar_game_args.h"
 #include "cube_adapter.h"
 #include "look.h"
+#include "panel_model.h"
 #include "qx_platform.h"
 #include "qx_prefs.h"
 #include "qx_session.h"
@@ -794,6 +795,206 @@ extern "C" int qx_app_startup(void) {
     return 1;
 }
 
+// ---- The settings panel's bridge (QxSession draws the panel; panel_model.h builds it from these) ----
+// The Level tab's own state (LevelPicker's @State): the picked level (-1: follow the current one) and act, and the note
+// under Go / Play from the start.
+static struct PanelLevelUi { int level = -1, act = 0, going = -1; bool saw_pending = false; std::string note; } g_level_ui;
+static std::string text_of(int (*fn)(char *, int)) {
+    char b[512];
+    return fn(b, (int)sizeof b) ? std::string(b) : std::string();
+}
+static int picked_level() {
+    if (g_level_ui.level >= 0) return g_level_ui.level;
+    arvos_level_view v{};
+    return arvos_level_view_get(&v) && v.current >= 0 ? v.current : 0;
+}
+static std::string level_note() {   // LevelPicker.follow: the warp's note clears on arrival
+    arvos_level_view v{};
+    if (g_level_ui.going >= 0 && arvos_level_view_get(&v)) {
+        if (v.pending) g_level_ui.saw_pending = true;
+        else if (v.current == g_level_ui.going || g_level_ui.saw_pending) {
+            g_level_ui.note = v.current == g_level_ui.going ? "" : "landed elsewhere";
+            g_level_ui.going = -1;
+        }
+    }
+    return g_level_ui.note;
+}
+static std::string now_line() {   // LevelNowLine
+    if (!has_levels()) return "";
+    arvos_level_view v{};
+    if (!arvos_level_view_get(&v)) return "Now: starting";
+    if (v.pending) return "Now: warping...";
+    const bool acts = v.current >= 0 && arvos_level_has_acts(v.current);
+    return "Now: " + std::string(v.current_name) + (v.act > 0 && acts ? ", act " + std::to_string(v.act) : "");
+}
+static std::string num(double v) { char b[32]; std::snprintf(b, sizeof b, "%g", v); return b; }
+static bool same_value(const std::string &a, const std::string &b) {   // AudioModel.currentPreset's comparison
+    if (a == b) return true;
+    char *ea = nullptr, *eb = nullptr;
+    const double x = std::strtod(a.c_str(), &ea), y = std::strtod(b.c_str(), &eb);
+    return ea != a.c_str() && eb != b.c_str() && std::fabs(x - y) < 1e-6;
+}
+static std::vector<std::string> pack_names(int kind) {   // PacksModel.refresh's order
+    static const char *const preferred[] = {"SM64 Reloaded", "Render96 HD", "Render96 Models (Balanced)", "Render96 Models", "SwagSkeleton95"};
+    std::vector<std::pair<int, std::string>> list;
+    const int n = arvos_pack_count();
+    for (int i = 0; i < n; i++) {
+        char name[128];
+        if (arvos_pack_info(i, name, sizeof name) != kind) continue;
+        int rank = 5;
+        for (int r = 0; r < 5; r++) if (std::strcmp(name, preferred[r]) == 0) rank = r;
+        list.emplace_back(rank * 1000 + (int)list.size(), name);
+    }
+    std::stable_sort(list.begin(), list.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+    std::vector<std::string> out;
+    for (const auto &p : list) out.push_back(p.second);
+    return out;
+}
+static std::string panel_get(const std::string &id) {
+    AppState &s = state();
+    auto has = [&](const char *prefix) { return id.compare(0, std::strlen(prefix), prefix) == 0; };
+    if (id == "ui.tab") { char b[16]; arvos_quest_ui_tab(b, sizeof b); return b; }
+    if (id == "level.start_in") return s.start_in ? "story" : "level";
+    if (id == "level.level") return std::to_string(picked_level());
+    if (id == "level.act") return std::to_string(g_level_ui.act);
+    if (id == "level.has_acts") return arvos_level_has_acts(picked_level()) ? "1" : "0";
+    if (id == "level.note") return level_note();
+    if (id == "look.room_light") {   // RoomLightText
+        arvos_room_light i{};
+        if (!arvos_room_light_get(&i)) return "room light: -";
+        char b[128];
+        std::snprintf(b, sizeof b, "%s - brightness %.2fx - probes %llu", i.room ? "room" : "fixed key light", (double)i.gain, i.probes);
+        return b;
+    }
+    if (id == "look.packs_tex_on" || id == "look.packs_models_on") return g_packs[id == "look.packs_tex_on" ? SM64_PACK_TEXTURES : SM64_PACK_MODELS].on ? "1" : "0";
+    if (id == "look.packs_tex" || id == "look.packs_models") return g_packs[id == "look.packs_tex" ? SM64_PACK_TEXTURES : SM64_PACK_MODELS].name;
+    if (id == "audio.preset") {
+        const ar::AudioSettings a = s.audio.get();
+        for (const std::string &p : ar::audio_preset_names()) {
+            std::vector<std::pair<std::string, std::string>> kv;
+            if (!ar::audio_preset_values(p, &kv)) continue;
+            bool all = true;
+            for (const auto &x : kv) all = all && same_value(ar::audio_get(a, x.first), x.second);
+            if (all) return p;
+        }
+        return "";
+    }
+    if (id == "sm64.audio_state") return std::to_string(arvos_sm64_audio_state());
+    if (has("look.")) return ar::look_get(s.look.get(), id.substr(5));
+    if (has("audio.")) return ar::audio_get(s.audio.get(), id.substr(6));
+    if (has("sm64.")) {
+        char b[64];
+        return has_levels() && ar_adapter_sm64_get_setting(id.c_str() + 5, b, sizeof b) ? std::string(b) : std::string();
+    }
+    if (!has_levels()) return "";
+    if (id == "world.mario_cm") return num(std::round(arvos_mario_cm() * 10.0) / 10.0);
+    if (id == "world.mario_cm_readout") { char b[96]; return arvos_scale_readout(arvos_mario_cm(), b, sizeof b) ? std::string(b) : std::string(); }
+    if (id == "world.draw_all_rooms") return arvos_draw_all_rooms() == 1 ? "1" : "0";
+    if (id == "world.hide_outside") return ar_adapter_sm64_hide_outside() ? "1" : "0";
+    if (id == "world.other_rooms") return std::to_string(arvos_other_rooms());
+    if (id == "world.billboards") return std::to_string(ar_adapter_sm64_billboard_style());
+    if (id == "world.cannon_visible") return arvos_cannon_visible() == 1 ? "1" : "0";
+    if (id == "world.tree_style") return std::to_string(ar_adapter_sm64_tree_style());
+    if (id == "world.trees_3d") return arvos_trees_3d() ? "1" : "0";
+    return "";
+}
+static bool panel_set(const std::string &id, const std::string &v, bool final_value) {
+    auto has = [&](const char *prefix) { return id.compare(0, std::strlen(prefix), prefix) == 0; };
+    const int iv = std::atoi(v.c_str());
+    if (id == "ui.tab") { arvos_quest_set_ui_tab(v.c_str()); return true; }
+    if (id == "level.start_in") return arvos_set_start_in(v == "story") != 0;
+    if (id == "level.level") { g_level_ui.level = iv; g_level_ui.note.clear(); return true; }
+    if (id == "level.act") { g_level_ui.act = std::min(std::max(iv, 0), 6); return true; }
+    if (id == "look.packs_tex_on" || id == "look.packs_models_on") {
+        const int kind = id == "look.packs_tex_on" ? SM64_PACK_TEXTURES : SM64_PACK_MODELS;
+        arvos_set_packs(kind, v == "1", g_packs[kind].name.c_str());
+        return true;
+    }
+    if (id == "look.packs_tex" || id == "look.packs_models") {
+        const int kind = id == "look.packs_tex" ? SM64_PACK_TEXTURES : SM64_PACK_MODELS;
+        arvos_set_packs(kind, g_packs[kind].on, v.c_str());
+        return true;
+    }
+    if (id == "audio.preset") return arvos_apply_audio_preset(v.c_str()) != 0;
+    if (has("look.")) return arvos_set_look(id.c_str() + 5, v.c_str(), final_value ? 1 : 0) != 0;
+    if (has("audio.")) return arvos_set_audio(id.c_str() + 6, v.c_str(), final_value ? 1 : 0) != 0;
+    if (has("sm64.")) return arvos_sm64_setting_set(id.c_str() + 5, v.c_str()) != 0;
+    if (id == "world.mario_cm") { arvos_set_mario_cm(std::atof(v.c_str()), final_value ? 1 : 0); return true; }
+    if (id == "world.draw_all_rooms") { arvos_set_draw_all_rooms(v == "1"); return true; }
+    if (id == "world.hide_outside") { arvos_set_hide_outside(v == "1"); return true; }
+    if (id == "world.other_rooms") { arvos_set_other_rooms(iv); return true; }
+    if (id == "world.billboards") { arvos_set_billboards(iv); return true; }
+    if (id == "world.cannon_visible") { arvos_set_cannon_visible(v == "1"); return true; }
+    if (id == "world.tree_style") { arvos_set_tree_style(iv); return true; }
+    ar::vos_log("AR_PANEL unknown setting %s", id.c_str());
+    return false;
+}
+static bool panel_press(const std::string &id) {
+    if (id == "level.go") {   // LevelPicker's Go
+        const int i = picked_level(), act = arvos_level_has_acts(i) ? g_level_ui.act : 0;
+        char name[64] = "";
+        arvos_level_name(i, name, sizeof name);
+        if (arvos_select_level(i, act)) {
+            g_level_ui.going = i; g_level_ui.saw_pending = false; g_level_ui.level = -1;
+            g_level_ui.note = std::string("warping to ") + name + "...";
+            return true;
+        }
+        g_level_ui.going = -1;
+        g_level_ui.note = "not changed (reason in the status below)";
+        return false;
+    }
+    if (id == "level.play_from_start") {
+        const bool ok = arvos_play_from_start() != 0;
+        g_level_ui.note = ok ? "to the title..." : "not now (reason in the status below)";
+        return ok;
+    }
+    if (id == "look.neutral_lum") {   // "Set as neutral"
+        arvos_room_light i{};
+        return arvos_room_light_get(&i) && i.abs_lum > 0.f && arvos_set_look("neutral_lum", num(i.abs_lum).c_str(), 1);
+    }
+    if (id == "look.neutral_reset") return arvos_set_look("neutral_lum", "0", 1) != 0;
+    if (id == "table.replace") { arvos_replace_table(); return true; }
+    if (id == "table.scan") { arvos_quest_request_scan(); return true; }
+    if (id == "app.quit") { arvos_quest_request_quit(); return true; }   // the loop ends after this frame
+    ar::vos_log("AR_PANEL unknown button %s", id.c_str());
+    return false;
+}
+static ar::panel::Bridge make_panel_bridge() {
+    ar::panel::Bridge b;
+    b.get = panel_get;
+    b.set = panel_set;
+    b.press = panel_press;
+    b.has_levels = [] { return has_levels(); };
+    b.locked = [] { return !state().game_lock.why().empty(); };
+    b.names = [](const std::string &list) {
+        std::vector<std::string> out;
+        auto keys = [&](int n, int (*key)(int, char *, int)) {
+            for (int i = 0; i < n; i++) { char k[64]; if (key(i, k, sizeof k)) out.push_back(k); }
+        };
+        if (list == "levels" || list == "level_sections") {
+            for (int i = 0, n = arvos_level_count(); i < n; i++) {
+                char b[96] = "";
+                if (list == "level_sections") out.push_back(std::to_string(arvos_level_section(i)));
+                else out.push_back(arvos_level_label(i, b, sizeof b) || arvos_level_name(i, b, sizeof b) ? b : "?");
+            }
+        } else if (list == "packs_tex") out = pack_names(SM64_PACK_TEXTURES);
+        else if (list == "packs_models") out = pack_names(SM64_PACK_MODELS);
+        else if (list == "audio_presets") out = ar::audio_preset_names();
+        else if (list == "look_keys") out = ar::look_keys();
+        else if (list == "audio_keys") out = ar::audio_keys();
+        else if (list == "sm64_keys") keys(arvos_sm64_setting_count(), arvos_sm64_setting_key);
+        return out;
+    };
+    b.status = [] {   // one line: the refusal, the status and the hint arvos_status puts on lines of their own
+        std::string t = text_of(arvos_status);
+        for (size_t i; (i = t.find('\n')) != std::string::npos;) t.replace(i, 1, " | ");
+        return t;
+    };
+    b.hint = [] { return text_of(arvos_quest_hint); };
+    b.now_line = now_line;
+    return b;
+}
+
 // ---- The frame loop ----
 extern "C" void arvos_layer_run(void *) {
     AppState &s = state();
@@ -868,6 +1069,7 @@ extern "C" void arvos_layer_run(void *) {
     bool game = false;
     if (a) {
         s.session.reset(new ar::QxSession(a, *s.platform, s.docs));
+        s.session->set_panel_bridge(make_panel_bridge());   // before the first frame: the menu button opens the panel
         const ar::SaveFolderChoice sf = ar::save_folder_for(s.opts.game, s.opts.game == "sm64" && sm64_setup_start(setup.c_str()) == 1,
                                                             false, false);
         std::string folder, ferr;
