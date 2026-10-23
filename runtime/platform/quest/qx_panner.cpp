@@ -2,6 +2,9 @@
 #include "qx_panner.h"
 #include <cmath>
 #include "vos_scene_pos.h"
+extern "C" {
+#include "ar_audio_distance.h"
+}
 
 namespace ar {
 namespace {
@@ -36,8 +39,14 @@ void qx_panner_plan(const ar_audio_tuning &tuning, const ar_pose &listener, cons
         if (!lis_ok || !(s.flags & AR_SRC_ACTIVE) || !finite3(s.pos)) continue;
         float pos[3];
         const float g = ar_audio_lane_gain(&t, &listener, &s, pos);
-        if (!std::isfinite(g) || !finite3(pos)) continue;
-        out[l] = PannerLane{true, g, (float)listener_direction(listener, pos).azimuth_deg};
+        if (!finite3(pos)) continue;
+        const ListenerDirection d = listener_direction(listener, pos);
+        // ar_audio_lane_gain adds only the tuning's extra distance gain: the base model is PHASE's envelope (the app's
+        // curve, ar_audio_distance_gain), which PHASE applied itself to every lane but the NO_DISTANCE_LOSS ones.
+        const float base = (s.flags & AR_SRC_NO_DISTANCE_LOSS) ? 1.f : ar_audio_distance_gain((float)d.distance_m);
+        const float gain = g * base;
+        if (!std::isfinite(gain)) continue;
+        out[l] = PannerLane{true, gain, (float)d.azimuth_deg};
     }
 }
 

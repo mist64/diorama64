@@ -24,7 +24,10 @@ int main() {
     src[3] = {4, AR_SRC_ACTIVE | AR_SRC_NO_DISTANCE_LOSS, {0.f, 0.f, -5.f}, 1.f};
     PannerLane plan[AR_AUDIO_MAX_SOURCES]; qx_panner_plan(t, lis, src, plan);
     CHECK(plan[0].active && plan[0].azimuth_deg > 5.f && !plan[1].active && plan[1].gain == 0.f);
-    CHECK(plan[2].active && fabsf(plan[2].azimuth_deg) < 1e-3f && plan[2].gain >= plan[3].gain);   // at the listener's feet: at least as loud as 6 m away
+    // distance attenuation (the spec): 1 m ahead is louder than 3 m ahead; a NO_DISTANCE_LOSS lane 6 m away keeps gain 1
+    CHECK(plan[2].active && fabsf(plan[2].azimuth_deg) < 1e-3f && fabsf(plan[3].gain - 1.f) < 1e-5f);
+    { ar_audio_source far[AR_AUDIO_MAX_SOURCES]{}; far[0] = {5, AR_SRC_ACTIVE, {0.f, 0.f, -2.f}, 1.f}; PannerLane fp[AR_AUDIO_MAX_SOURCES];
+      qx_panner_plan(t, lis, far, fp); CHECK(fp[0].active && fp[0].gain < plan[2].gain && plan[2].gain < 1.f); }
     CHECK(!plan[4].active);
     // mix: a lane fully right lands in the right channel only, the bed passes through
     std::vector<float> in(kSceneChannels * 4, 0.f), out(8, 0.f);

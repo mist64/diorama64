@@ -13,7 +13,8 @@ namespace ar {
 
 struct PannerLane { bool active; float gain; float azimuth_deg; };   // azimuth from listener_direction after ar_widen_azimuth_deg
 // Pure. From the lanes' sources (positions in table metres) and the listener (table space): per-lane gain via
-// ar_audio_lane_gain (the tuning clamped first) and the azimuth of the position it returns, which ar_audio_widen already
+// ar_audio_lane_gain (the tuning clamped first) times the base distance model PHASE applied on visionOS (the app's
+// curve, ar_audio_distance_gain; 1 for AR_SRC_NO_DISTANCE_LOSS lanes) and the azimuth of the position it returns, which ar_audio_widen already
 // widened (ar_widen_azimuth_deg): widening it again would double the tuning's widen. A lane with a non-finite position,
 // an inactive source or a non-finite gain is {false, 0, 0}; a non-finite listener makes every lane so.
 void qx_panner_plan(const ar_audio_tuning &t, const ar_pose &listener, const ar_audio_source src[AR_AUDIO_MAX_SOURCES],
