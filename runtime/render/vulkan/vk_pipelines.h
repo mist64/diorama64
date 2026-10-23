@@ -80,6 +80,8 @@ VkRenderPass make_resolve_pass(VkDevice dev, VkFormat cf, VkFormat df);
 VkRenderPass make_map_pass(VkDevice dev);
 // The resolve's shaders: vertex, fragment, and the fragment that also writes gl_FragDepth.
 bool make_resolve_shaders(VkDevice dev, VkShaderModule out[3], std::string *err);
+// A full-screen triangle pipeline (no vertex input, no blending, no culling): the resolve's, and the composite's with its
+// layout and fragment shader.
 VkPipeline make_resolve_pipeline(VkDevice dev, VkPipelineCache cache, VkPipelineLayout layout, VkRenderPass rp, VkShaderModule vs,
                                  VkShaderModule fs, bool depth);
 
@@ -100,15 +102,26 @@ bool make_combiner_shaders(VkDevice dev, const DrawPacket &draw, bool a2c, VkSha
 VkPipeline make_draw_pipeline(const BuildEnv &env, VkShaderModule vs, VkShaderModule fs, const PipeKey &k, uint32_t state, std::string *why);
 
 // The fixed passes' pipelines (prepare_passes): the depth maps' (depth.vert, without and with depth_cut.frag, each
-// without and with depth clamp), the AO fill and the gamma mip kernels. Null where a compile failed (logged).
+// without and with depth clamp), the AO fill (its volume R8, or RGBA8 with ao_rgba8), the composite (fullscreen.vert +
+// composite.frag, its module kept for other formats; the pipeline for composite_pass, a target's RGBA8) and the gamma
+// mip kernels. Null where a compile failed (logged).
 struct FixedLayouts {
-    VkPipelineLayout depth = VK_NULL_HANDLE, ao = VK_NULL_HANDLE, mip = VK_NULL_HANDLE;
-    VkRenderPass map_pass = VK_NULL_HANDLE;
+    VkPipelineLayout depth = VK_NULL_HANDLE, ao = VK_NULL_HANDLE, mip = VK_NULL_HANDLE, composite = VK_NULL_HANDLE;
+    VkRenderPass map_pass = VK_NULL_HANDLE, composite_pass = VK_NULL_HANDLE;
+    VkShaderModule fullscreen_vs = VK_NULL_HANDLE;
+    bool ao_rgba8 = false;
 };
-struct FixedPipes { VkPipeline depth[2][2] = {}; VkPipeline ao = VK_NULL_HANDLE; };   // depth[cut][clamp]
+struct FixedPipes {
+    VkPipeline depth[2][2] = {};   // [cut][clamp]
+    VkPipeline ao = VK_NULL_HANDLE;
+    VkShaderModule composite_fs = VK_NULL_HANDLE;
+    VkPipeline composite = VK_NULL_HANDLE;
+};
 FixedPipes make_fixed_pipelines(VkDevice dev, VkPipelineCache cache, const FixedLayouts &l);
 VkPipeline make_mip_pipeline(VkDevice dev, VkPipelineCache cache, VkPipelineLayout layout);
-VkPipeline make_compute_pipeline(VkDevice dev, VkPipelineCache cache, VkPipelineLayout layout, const char *shader);
+// defines: #define lines inserted after the source's #version line
+VkPipeline make_compute_pipeline(VkDevice dev, VkPipelineCache cache, VkPipelineLayout layout, const char *shader,
+                                 const char *defines = "");
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The warm-up pool: metal_device.mm's warm lanes, promotions and holds on two worker threads.

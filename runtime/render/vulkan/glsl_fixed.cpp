@@ -116,7 +116,11 @@ const char *kAoFillComp = R"(#version 450
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 layout(std140, set = 0, binding = 0) uniform AoU { vec4 min_voxel; uvec4 dims_n; vec4 range; mat4 uv[32]; } u;
 layout(set = 0, binding = 1) uniform sampler2DArray maps;
+#ifdef AO_RGBA8
+layout(set = 0, binding = 2, rgba8) uniform writeonly image3D vol;
+#else
 layout(set = 0, binding = 2, r8) uniform writeonly image3D vol;
+#endif
 void main() {
     const uvec3 id = gl_GlobalInvocationID;
     if (any(greaterThanEqual(id, u.dims_n.xyz))) { return; }

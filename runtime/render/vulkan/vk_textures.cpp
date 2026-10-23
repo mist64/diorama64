@@ -80,6 +80,7 @@ void VulkanDevice::record_textures(bool frame_start) {
     for (Upload &u : uploads_) {
         const Tex &t = u.tex;
         image_barrier(cmd_, t.im.img, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        fresh_images_.push_back(t.im.img);
         VkBufferImageCopy c{};
         c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         c.imageExtent = {t.w, t.h, 1};

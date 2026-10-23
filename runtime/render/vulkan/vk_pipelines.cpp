@@ -455,8 +455,10 @@ Built build_warm(const BuildEnv &env, const WarmJob &j) {
 // ---------------------------------------------------------------------------------------------------------------------
 // The fixed passes
 // ---------------------------------------------------------------------------------------------------------------------
-VkPipeline make_compute_pipeline(VkDevice dev, VkPipelineCache cache, VkPipelineLayout layout, const char *shader) {
-    VkShaderModule m = fixed_module(dev, fixed_source(shader), GlslStage::compute, shader);
+VkPipeline make_compute_pipeline(VkDevice dev, VkPipelineCache cache, VkPipelineLayout layout, const char *shader, const char *defines) {
+    std::string src = fixed_source(shader);
+    if (!src.empty() && defines && *defines) src.insert(src.find('\n') + 1, defines);
+    VkShaderModule m = fixed_module(dev, src, GlslStage::compute, shader);
     if (!m || !layout) { if (m) vkDestroyShaderModule(dev, m, nullptr); return VK_NULL_HANDLE; }
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = stage_info(VK_SHADER_STAGE_COMPUTE_BIT, m);
@@ -471,7 +473,12 @@ VkPipeline make_mip_pipeline(VkDevice dev, VkPipelineCache cache, VkPipelineLayo
 }
 FixedPipes make_fixed_pipelines(VkDevice dev, VkPipelineCache cache, const FixedLayouts &l) {
     FixedPipes out;
-    out.ao = make_compute_pipeline(dev, cache, l.ao, "ao_fill.comp");
+    out.ao = make_compute_pipeline(dev, cache, l.ao, "ao_fill.comp", l.ao_rgba8 ? "#define AO_RGBA8 1\n" : "");
+    out.composite_fs = fixed_module(dev, fixed_source("composite.frag"), GlslStage::fragment, "composite.frag");
+    if (out.composite_fs && l.fullscreen_vs && l.composite && l.composite_pass) {
+        out.composite = make_resolve_pipeline(dev, cache, l.composite, l.composite_pass, l.fullscreen_vs, out.composite_fs, false);
+        if (!out.composite) vos_log("AR_VULKAN composite pipeline failed");
+    }
     VkShaderModule vs = fixed_module(dev, fixed_source("depth.vert"), GlslStage::vertex, "depth.vert");
     VkShaderModule fs = fixed_module(dev, fixed_source("depth_cut.frag"), GlslStage::fragment, "depth_cut.frag");
     if (vs && l.depth && l.map_pass) {

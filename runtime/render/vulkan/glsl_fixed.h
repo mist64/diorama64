@@ -44,7 +44,7 @@
 //                    range.x the occlusion radius (level units); uv[j]: view j's (u, v, depth) from level space
 //                    (the matrices live in the same block, after the Metal AoU members: 48 + 32 x 64 = 2096 bytes std140)
 //   set 0 binding 1  sampler2DArray maps                           the views' depth maps, read by texel
-//   set 0 binding 2  writeonly image3D (r8) vol                    the AO volume
+//   set 0 binding 2  writeonly image3D (r8; AO_RGBA8: rgba8) vol   the AO volume (RGBA8 where R8 is no storage format)
 //
 // mip_gamma.comp (compute, local size 8 x 8; Metal mip_gamma): one invocation per destination texel; the alpha-weighted
 //   2 x 2 mean in linear light (3 taps along an odd source's last row / column), written sRGB-encoded.

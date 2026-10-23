@@ -1,6 +1,7 @@
 // The Vulkan IRenderDevice's class (internal to ar_render_vulkan). Its members are defined in vulkan_device.cpp (init,
-// targets, recording, the resolve, frames, read-back), vk_textures.cpp (textures, mips, samplers) and
-// vk_device_pipes.cpp (draw pipelines, the warm-up, the pipeline cache, the fixed passes' pipelines).
+// targets, recording, the resolve, frames, read-back), vk_textures.cpp (textures, mips, samplers),
+// vk_device_pipes.cpp (draw pipelines, the warm-up, the pipeline cache, the fixed passes' pipelines) and vk_passes.cpp
+// (the lighting constants, the depth maps, the AO bake and composite).
 //
 // The Vulkan port of metal_device.mm (read it for the behaviour; the comments here say only where Vulkan differs).
 // - Y: the shared matrices are Metal's (NDC +y up). Every draw pass flips with a negative-height viewport (Vulkan 1.1), so
@@ -15,6 +16,12 @@
 //   on_gpu_done. Resources replaced while frames may use them are retired with the current frame serial and destroyed
 //   once that frame completed.
 // - Decals: slope-scaled depth bias +decal_slope (reverse-Z: positive is toward the viewer, as Metal's setDepthBias).
+// - Depth maps (shadow, underside, water footprint, the AO views): D32_SFLOAT, cleared to 1, LESS (Metal's, not
+//   reverse-Z), drawn with the same Y-flipped viewport, so uv_from_clip reads them as Metal does. Each is in
+//   SHADER_READ_ONLY_OPTIMAL whenever no map pass is recording it; a pass records which map (or placeholder) it samples.
+// - The AO bake records into its own command buffer, submitted at once (before the open frame's, on the same queue): its
+//   final barrier orders the volume's writes before every later fragment read. The completion thread retires it like a
+//   frame and records its GPU time. It never samples a texture whose upload sits in the open frame (white instead).
 #pragma once
 #include <atomic>
 #include <condition_variable>
@@ -40,6 +47,9 @@ using vk::Image;
 using vk::Slice;
 constexpr uint32_t kFrames = vk::FrameRing::kSlots;   // frames in flight (one ring each)
 constexpr VkFormat kPlaceholderDepth = VK_FORMAT_D32_SFLOAT;
+// metal_device.mm's sizes
+constexpr uint32_t kShadowSize = 2048, kUndersideSize = 256, kFootprintSize = 512, kAoMapSize = 512, kAoMaxViews = 32;
+constexpr uint32_t kAoSlots = AoSchedule::kSlots;
 
 // The uniform structs: byte for byte metal_device.mm's, also glsl_emitter.cpp's std140 blocks.
 struct DrawU { float prim[4]; float env[4]; float lod; float decal; float noise_seed; float fade; float clip[4]; float clip_on; uint32_t lflags;
@@ -81,6 +91,15 @@ struct Rec {
     // with this frame's serial, so the view stays valid until the frame completed)
     std::vector<VkImageView> tex;
     std::vector<uint32_t> sampled;   // targets (1-based) whose resolved colour the draws sample (bind_target_texture)
+    // the maps the draws sample as they were at record time: the frame's map, or the placeholder
+    VkImageView shadow = VK_NULL_HANDLE, under = VK_NULL_HANDLE, foot = VK_NULL_HANDLE, ao = VK_NULL_HANDLE;
+};
+// A depth map (shadow, underside, footprint): D32_SFLOAT, its view (depth aspect) both attachment and sampled.
+struct Map {
+    Image im;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    uint32_t size = 0;
 };
 struct Target {
     Image color, depth;                          // the single-sample (resolved) images; views: 2D_ARRAY of all layers
@@ -137,14 +156,23 @@ public:
     void encode_pass(uint32_t target, const PassDesc &pass, const ViewConstants &view, const fc_vertex *verts, uint32_t nv,
                      const DrawPacket *draws, uint32_t nd, const int8_t *normals, const float *prev_pos) override;
     void set_lighting(const LightingFrame *lf) override;
-    // Task 3: the depth maps, AO, the environment reduction and composite
-    void encode_underside_map(const UndersideDesc &, const fc_vertex *, uint32_t, const DrawPacket *, uint32_t, const DepthExtras &) override {}
-    void encode_shadow_map(const ShadowFit &, const fc_vertex *, uint32_t, const DrawPacket *, uint32_t, const DepthExtras &) override {}
-    bool bake_ao(uint32_t, const AoVolume &, const std::vector<ShadowFit> &, float, const fc_vertex *, uint32_t, const DrawPacket *,
-                 uint32_t, const DepthExtras &) override { return false; }
+    // the depth maps, AO and composite (vk_passes.cpp); no environment probe on the Quest
+    void encode_underside_map(const UndersideDesc &u, const fc_vertex *verts, uint32_t nv, const DrawPacket *draws, uint32_t nd,
+                              const DepthExtras &x) override;
+    void encode_water_footprint(const float window[4], const float clip_from_level[16], const fc_vertex *verts, uint32_t nv,
+                                const DrawPacket *draws, uint32_t nd) override;
+    bool reuse_water_footprint() override;
+    void encode_shadow_map(const ShadowFit &fit, const fc_vertex *verts, uint32_t nv, const DrawPacket *draws, uint32_t nd,
+                           const DepthExtras &x) override;
+    bool bake_ao(uint32_t slot, const AoVolume &vol, const std::vector<ShadowFit> &views, float radius, const fc_vertex *verts,
+                 uint32_t nv, const DrawPacket *draws, uint32_t nd, const DepthExtras &x) override;
+    void prepare_ao() override;
+    bool ao_bake_time(uint64_t *bake, double *ms) const override;
     void encode_environment_reduce(void *, uint32_t) override {}
     bool environment_stats(EnvStats *, uint32_t *) const override { return false; }
-    void encode_composite(uint32_t, void *, uint32_t, uint32_t) override {}
+    const char *environment_error() const override { return "no environment probe on this platform"; }
+    void *copy_environment(void *, uint32_t) override { return nullptr; }
+    void encode_composite(uint32_t dst, void *external_texture, uint32_t under, uint32_t over) override;
     void encode_resolve(uint32_t src, const ExternalView &dst) override;
 
     // frames
@@ -190,7 +218,8 @@ private:
         uint64_t serial = 0;        // the frame last recorded in this slot
         bool submitted = false;     // its fence will signal (reset it before reuse)
     };
-    struct Job { uint64_t serial; VkFence fence; VkQueryPool queries; void (*done)(void *); void *ctx; };
+    // A frame (serial, done), or an AO bake (bake: its generation; completing it moves no serial).
+    struct Job { uint64_t serial; VkFence fence; VkQueryPool queries; void (*done)(void *); void *ctx; uint64_t bake = 0; };
     struct Garbage { uint64_t serial; std::function<void()> free; };
     struct Upload { Tex tex; Buffer staging; };
 
@@ -221,10 +250,25 @@ private:
     void flush(Target &t);
     bool scissor_for(const Viewport &v, uint32_t bw, uint32_t bh, VkRect2D *out) const;
     void encode_rec(const Target &t, const Rec &r);
-    VkDescriptorSet texture_set(const VkImageView tex[2], const VkSampler samp[2]);
+    VkDescriptorSet texture_set(const Rec &r, const VkImageView tex[2], const VkSampler samp[2]);
     bool record_resolve(uint32_t src, const ExternalView &dst);
     VkRenderPass resolve_render_pass(VkFormat cf, VkFormat df);
     VkPipeline resolve_pipeline(VkRenderPass rp, bool depth, bool *pending);
+    // the depth maps, AO, composite (vk_passes.cpp)
+    bool ensure_map(Map &m, uint32_t size);
+    void destroy_map(Map &m);
+    void flush_sampling(VkImageView map);
+    struct MapDraw {   // one depth-map render pass: where, how, and what
+        VkCommandBuffer cb; VkFramebuffer fb; uint32_t size;
+        const float *clip_from_level; float slope; bool clamp; bool bake;
+        VkBuffer vb; VkDeviceSize voff; VkBuffer pb; VkDeviceSize poff; uint32_t nv;
+    };
+    void encode_depth_map(const MapDraw &md, const DrawPacket *draws, uint32_t nd, const DepthExtras &x);
+    bool render_map(Map &m, uint32_t size, const float clip_from_level[16], const fc_vertex *verts, uint32_t nv,
+                    const DrawPacket *draws, uint32_t nd, float slope, bool clamp, const DepthExtras &x);
+    VkImageView bake_texture(uint32_t tex_id, bool bake) const;
+    VkPipeline composite_pipeline(VkFormat fmt);
+    void start_fixed();
     // textures (vk_textures.cpp)
     VkSampler sampler(const fc_sampler &s, bool depth_pass = false);
     VkImageView texture(uint32_t tex_id, uint32_t drawing_target) const;
@@ -270,6 +314,7 @@ private:
     bool depth_linear_ = false;    // D32_SFLOAT filters linearly: else every depth map is sampled nearest
     bool storage_rgba8_ = false;   // RGBA8 storage images: the gamma mip kernel writes the textures' levels
     bool depth_sample_warned_ = false;
+    bool ao_rgba8_ = false;        // no R8_UNORM storage images: the AO volume is RGBA8 (sampled .r)
     // multisampling
     PFN_vkCreateRenderPass2KHR create_rp2_ = nullptr;
     PFN_vkCmdSetCullModeEXT set_cull_ = nullptr;   // VK_EXT_extended_dynamic_state enabled: cull is dynamic
@@ -287,7 +332,7 @@ private:
     VkDescriptorSetLayout set0_layout_ = VK_NULL_HANDLE, set1_layout_ = VK_NULL_HANDLE, resolve_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout depth_set0_layout_ = VK_NULL_HANDLE, depth_set1_layout_ = VK_NULL_HANDLE, ao_set_layout_ = VK_NULL_HANDLE,
                           mip_set_layout_ = VK_NULL_HANDLE;
-    VkPipelineLayout pipe_layout_ = VK_NULL_HANDLE, resolve_layout_ = VK_NULL_HANDLE;
+    VkPipelineLayout pipe_layout_ = VK_NULL_HANDLE, resolve_layout_ = VK_NULL_HANDLE, composite_layout_ = VK_NULL_HANDLE;
     vk::FixedLayouts fixed_layouts_;
     vk::BuildEnv env_;
     vk::WarmPool pool_;
@@ -324,6 +369,19 @@ private:
     VkPipeline mip_pipe_ = VK_NULL_HANDLE;
     bool mip_taken_ = false;
     std::map<uint32_t, uint32_t> target_tex_;
+    std::vector<VkImage> fresh_images_;   // textures whose upload the open frame records (the AO bake runs before it)
+    // the depth maps and AO (vk_passes.cpp)
+    Map shadow_, under_, foot_;
+    bool shadow_valid_ = false, under_valid_ = false, foot_valid_ = false, foot_kept_ = false;
+    ShadowFit shadow_fit_{};
+    UndersideDesc under_desc_{};
+    float foot_window_[4] = {0.f, 0.f, 1.f, 1.f};
+    Image ao_[kAoSlots];
+    AoVolume ao_vol_[kAoSlots] = {};
+    VkImageView ao_bound_ = VK_NULL_HANDLE;   // set_lighting: this frame's AO volume, or none
+    uint64_t ao_gen_ = 0;                     // bakes submitted
+    bool depth_warned_ = false;
+    std::map<uint32_t, VkPipeline> composite_pipes_;   // by colour format
     // targets and frames
     std::deque<Target> targets_;   // a deque: create_target never moves the targets (flush holds references)
     LightU light_{};
@@ -339,10 +397,12 @@ private:
     std::deque<Garbage> garbage_;
     std::atomic<double> gpu_ms_{-1.0};
     // shared with the completion thread (under m_)
-    std::mutex m_;
+    mutable std::mutex m_;
     std::condition_variable cv_;
     std::deque<Job> jobs_;
     uint64_t completed_serial_ = 0, submitted_serial_ = 0;
+    uint64_t ao_done_gen_ = 0;   // the newest bake completed, and its GPU time
+    double ao_done_ms_ = 0.0;
     bool stop_ = false;
     std::thread done_thread_;
 };

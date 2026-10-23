@@ -1,7 +1,7 @@
 // The Vulkan IRenderDevice (the Quest's renderer back end), the counterpart of metal_device.mm: textures and their mips,
 // targets (multisample with a depth resolve), the passes, the resolve into the OpenXR swapchain, frames, read-back, the
-// combiner pipelines with their warm-up and the pipeline cache; the depth maps, AO, the environment reduction and
-// composite are stubs (plan 2, Task 3).
+// combiner pipelines with their warm-up and the pipeline cache, the room-lit look's depth maps (shadow, underside, water
+// footprint), the AO bake and composite. No environment probe: the reduction and copies are no-ops.
 //
 // Threading: every IRenderDevice call is made on one thread (the render thread). end_frame's on_gpu_done runs on the
 // device's completion thread.

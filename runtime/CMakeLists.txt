@@ -101,7 +101,7 @@ if(SM64AR_HOST_TESTS OR SM64AR_QUEST)
   target_include_directories(ar_glsl_compiler PUBLIC render/vulkan)
   target_link_libraries(ar_glsl_compiler PRIVATE glslang SPIRV glslang-default-resource-limits)
   add_library(ar_render_vulkan STATIC render/vulkan/vulkan_device.cpp render/vulkan/vk_pipelines.cpp render/vulkan/vk_device_pipes.cpp
-              render/vulkan/vk_textures.cpp render/vulkan/vk_frame_ring.cpp render/vulkan/vk_resources.cpp)
+              render/vulkan/vk_textures.cpp render/vulkan/vk_frame_ring.cpp render/vulkan/vk_resources.cpp render/vulkan/vk_passes.cpp)
   target_include_directories(ar_render_vulkan PUBLIC render/vulkan)
   target_link_libraries(ar_render_vulkan PUBLIC ar_render_common ar_render_vulkan_shaders ar_glsl_compiler PRIVATE ar_vos_logic)
   if(ANDROID)

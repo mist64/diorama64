@@ -224,11 +224,19 @@ size_t VulkanDevice::pipeline_count() const {
     return n;
 }
 
-// The fixed passes' pipelines (depth maps, AO fill) and the mip kernel compile on another thread from here on; their
-// first use (fixed_pipes) waits for them. Without it they compile at that first use.
+// The fixed passes' pipelines (depth maps, AO fill, composite) and the mip kernel compile on another thread from here on;
+// their first use (fixed_pipes) waits for them. Without it they compile at that first use.
 void VulkanDevice::prepare_passes() {
     if (!ok_) return;
     prepare_mips();
+    start_fixed();
+}
+// metal_device.mm prepare_ao: the AO kernel compiles off the render thread as soon as AO is wanted (here with the other
+// fixed passes' pipelines).
+void VulkanDevice::prepare_ao() {
+    if (ok_) start_fixed();
+}
+void VulkanDevice::start_fixed() {
     if (fixed_job_.valid() || fixed_taken_) return;
     VkDevice dev = dev_;
     VkPipelineCache cache = cache_;

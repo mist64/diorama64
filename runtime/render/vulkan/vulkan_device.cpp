@@ -89,6 +89,10 @@ bool VulkanDevice::init_device() {
     if (!depth_linear_) vos_log("AR_VULKAN D32_SFLOAT has no linear filtering here: the depth maps are sampled nearest");
     vkGetPhysicalDeviceFormatProperties(phys_, kColorFormat, &fp);
     storage_rgba8_ = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+    vkGetPhysicalDeviceFormatProperties(phys_, VK_FORMAT_R8_UNORM, &fp);   // the AO volume: R8 storage, else RGBA8
+    ao_rgba8_ = !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+    vos_log("AR_VULKAN ao_volume=%s", ao_rgba8_ ? "rgba8" : "r8");
+    fixed_layouts_.ao_rgba8 = ao_rgba8_;
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -139,7 +143,10 @@ bool VulkanDevice::init_device() {
     if (!(env_.rp[1] = target_pass(1, true, false))) return false;
     detect_msaa(false);
     ring_.init(&res_, ring_align_, [this](Buffer b) { retire([this, b]() mutable { res_.destroy_buffer(b); }); });
-    return make_placeholders() && make_resolve_shaders();
+    if (!make_placeholders() || !make_resolve_shaders()) return false;
+    fixed_layouts_.fullscreen_vs = resolve_vs_;   // the composite's vertex shader too
+    fixed_layouts_.composite = composite_layout_;
+    return (fixed_layouts_.composite_pass = resolve_render_pass(kColorFormat, VK_FORMAT_UNDEFINED)) != VK_NULL_HANDLE;
 }
 // supported_samples' inputs: the sample counts both attachments take, and a depth resolve mode (MAX: reverse-Z's nearest
 // sample; any: the first the device offers, for host tests on lavapipe, which has SAMPLE_ZERO only).
@@ -230,6 +237,8 @@ bool VulkanDevice::make_layouts() {
            pipe_layout({resolve_set_layout_}, &pr, &resolve_layout_) &&
            pipe_layout({depth_set0_layout_, depth_set1_layout_}, nullptr, &fixed_layouts_.depth) &&
            pipe_layout({ao_set_layout_}, nullptr, &fixed_layouts_.ao) && pipe_layout({mip_set_layout_}, nullptr, &fixed_layouts_.mip) &&
+           // composite.frag: under, over (the resolve's two combined image samplers)
+           pipe_layout({resolve_set_layout_}, nullptr, &composite_layout_) &&
            (fixed_layouts_.map_pass = vk::make_map_pass(dev_)) != VK_NULL_HANDLE;
 }
 // white (texture id 0 and unknown ids), the depth maps' stand-in (depth 1: "nothing above"), AO 1, a black env cube
@@ -302,6 +311,10 @@ void VulkanDevice::destroy_all() {
     for (auto &kv : textures_) res_.destroy_image(kv.second.im);
     for (Upload &u : uploads_) { res_.destroy_image(u.tex.im); res_.destroy_buffer(u.staging); }
     for (Image *im : {&white_, &depth_ph_, &ao_ph_, &env_ph_}) res_.destroy_image(*im);
+    for (Map *m : {&shadow_, &under_, &foot_}) destroy_map(*m);
+    for (Image &im : ao_) res_.destroy_image(im);
+    for (auto &kv : composite_pipes_) if (kv.second) vkDestroyPipeline(dev_, kv.second, nullptr);
+    if (fixed_.composite_fs) vkDestroyShaderModule(dev_, fixed_.composite_fs, nullptr);
     for (auto &kv : pipes_) {
         for (auto &v : kv.second.variants) if (v.second) vkDestroyPipeline(dev_, v.second, nullptr);
         if (kv.second.vs) vkDestroyShaderModule(dev_, kv.second.vs, nullptr);
@@ -310,7 +323,7 @@ void VulkanDevice::destroy_all() {
     for (auto &kv : resolve_pipes_) if (kv.second) vkDestroyPipeline(dev_, kv.second, nullptr);
     for (auto &kv : resolve_passes_) if (kv.second) vkDestroyRenderPass(dev_, kv.second, nullptr);
     for (auto &kv : target_passes_) if (kv.second) vkDestroyRenderPass(dev_, kv.second, nullptr);
-    for (VkPipeline p : {fixed_.depth[0][0], fixed_.depth[0][1], fixed_.depth[1][0], fixed_.depth[1][1], fixed_.ao, mip_pipe_})
+    for (VkPipeline p : {fixed_.depth[0][0], fixed_.depth[0][1], fixed_.depth[1][0], fixed_.depth[1][1], fixed_.ao, fixed_.composite, mip_pipe_})
         if (p) vkDestroyPipeline(dev_, p, nullptr);
     for (VkShaderModule m : {resolve_vs_, resolve_fs_, resolve_fs_depth_}) if (m) vkDestroyShaderModule(dev_, m, nullptr);
     for (auto &kv : samplers_) vkDestroySampler(dev_, kv.second, nullptr);
@@ -324,7 +337,7 @@ void VulkanDevice::destroy_all() {
     if (once_fence_) vkDestroyFence(dev_, once_fence_, nullptr);
     if (cmd_pool_) vkDestroyCommandPool(dev_, cmd_pool_, nullptr);   // frees every command buffer
     if (fixed_layouts_.map_pass) vkDestroyRenderPass(dev_, fixed_layouts_.map_pass, nullptr);
-    for (VkPipelineLayout l : {pipe_layout_, resolve_layout_, fixed_layouts_.depth, fixed_layouts_.ao, fixed_layouts_.mip})
+    for (VkPipelineLayout l : {pipe_layout_, resolve_layout_, composite_layout_, fixed_layouts_.depth, fixed_layouts_.ao, fixed_layouts_.mip})
         if (l) vkDestroyPipelineLayout(dev_, l, nullptr);
     for (VkDescriptorSetLayout l : {set0_layout_, set1_layout_, resolve_set_layout_, depth_set0_layout_, depth_set1_layout_, ao_set_layout_,
                                     mip_set_layout_})
@@ -434,6 +447,8 @@ void VulkanDevice::begin_frame() {
     encoders_ = 0;
     for (Target &t : targets_) t.encoded = false;
     gamma_n_ = gamma_texels_ = 0;
+    under_valid_ = shadow_valid_ = foot_valid_ = false;   // a map is sampled only in the frame that rendered it
+    fresh_images_.clear();
     record_textures(true);   // the uploads since the last frame, their mips and the re-mips due
 }
 void VulkanDevice::end_frame(void (*done)(void *), void *ctx, void *drawable) {
@@ -483,6 +498,7 @@ void VulkanDevice::completion_loop() {
             if (jobs_.empty()) return;   // stopping, nothing left
             j = jobs_.front();
         }
+        double ms = -1.0;
         if (j.fence) {
             const VkResult r = vkWaitForFences(dev_, 1, &j.fence, VK_TRUE, UINT64_MAX);
             if (r != VK_SUCCESS) vos_log("AR_VULKAN vkWaitForFences failed: %d", (int)r);
@@ -490,14 +506,16 @@ void VulkanDevice::completion_loop() {
             if (r == VK_SUCCESS && j.queries &&
                 vkGetQueryPoolResults(dev_, j.queries, 0, 2, sizeof ts, ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
                 const uint64_t ticks = (ts[1] - ts[0]) & timestamp_mask_;   // the counter wraps at timestampValidBits
-                gpu_ms_.store((double)ticks * props_.limits.timestampPeriod * 1e-6);
+                ms = (double)ticks * props_.limits.timestampPeriod * 1e-6;
+                if (!j.bake) gpu_ms_.store(ms);
             }
         }
         if (j.done) j.done(j.ctx);
         {
             std::lock_guard<std::mutex> g(m_);
             jobs_.pop_front();
-            completed_serial_ = j.serial;
+            if (!j.bake) completed_serial_ = j.serial;   // a bake precedes its frame's job: that frame moves the serial
+            else if (j.fence && j.bake > ao_done_gen_) { ao_done_gen_ = j.bake; ao_done_ms_ = std::max(0.0, ms); }
         }
         cv_.notify_all();
     }
@@ -647,6 +665,10 @@ void VulkanDevice::encode_pass(uint32_t target, const PassDesc &pass, const View
     if (t.nrec == t.recs.size()) t.recs.emplace_back();
     Rec &r = t.recs[t.nrec++];
     r.pass = pass; r.view = view; r.light = light_; r.nv = nv;
+    r.shadow = shadow_valid_ ? shadow_.im.view : depth_ph_.view;
+    r.under = under_valid_ ? under_.im.view : depth_ph_.view;
+    r.foot = foot_valid_ ? foot_.im.view : depth_ph_.view;
+    r.ao = ao_bound_ ? ao_bound_ : ao_ph_.view;
     r.draws.clear();
     r.tex.clear();
     r.sampled.clear();
@@ -668,47 +690,6 @@ void VulkanDevice::encode_pass(uint32_t target, const PassDesc &pass, const View
                     r.sampled.push_back(bt->second);
             }
     }
-}
-void VulkanDevice::set_lighting(const LightingFrame *lf) {
-    light_ = LightU{};
-    if (!lf || !lf->on) return;
-    for (int k = 0; k < 3; k++) { light_.dir_on[k] = lf->dir[k]; light_.tint_amb[k] = lf->tint[k]; }
-    light_.dir_on[3] = 1.f;
-    light_.tint_amb[3] = lf->ambient;
-    light_.contact[0] = lf->contact ? lf->contact_strength : 0.f;
-    light_.contact[1] = 0.03f * lf->upm;
-    light_.contact[2] = 0.015f * lf->upm;
-    light_.contact[3] = lf->ground_y;
-    // Task 3: the underside and shadow maps, AO, reflections and the water footprint (their textures are the
-    // placeholders and their switches stay off)
-    light_.shadow[1] = 1.f + 2.f * lf->softness;
-    light_.cast[0] = lf->table_cast;
-    light_.relight[0] = lf->relight ? 1.f : 0.f;
-    light_.relight[1] = lf->relight_strength;
-    light_.toy[0] = lf->toy ? 1.f : 0.f;
-    light_.toy[1] = lf->gloss;
-    light_.toy[2] = lf->rim;
-    light_.env5[3] = 1.f;
-    if (lf->liquid) {
-        const uint32_t n = std::min<uint32_t>(lf->water_count, 8u);
-        light_.liquid[0] = 1.f; light_.liquid[1] = lf->liquid_time_s; light_.liquid[2] = (float)n; light_.liquid[3] = 0.25f * lf->liquid_upm;
-        light_.liquid2[0] = 6.2831853f / (0.04f * lf->liquid_upm); light_.liquid2[1] = 0.08f;
-        light_.liquid2[3] = 0.01f * lf->liquid_upm;
-        for (uint32_t i = 0; i < n; i++) {
-            for (int k = 0; k < 4; k++) light_.water_box[i][k] = lf->water[i][k];
-            light_.water_y[i / 4][i % 4] = lf->water[i][4];
-        }
-    }
-    if (lf->cut && lf->cut_radius > 0.f) {
-        for (int k = 0; k < 3; k++) light_.cut[k] = lf->cut_target[k];
-        light_.cut[3] = lf->cut_radius;
-        light_.cut2[0] = 0.f; light_.cut2[1] = lf->cut_keep; light_.cut2[2] = std::max(lf->cut_cell, 1e-4f);
-    }
-    if (lf->trans_kind) {
-        light_.trans[0] = (float)lf->trans_kind; light_.trans[1] = lf->trans_cover; light_.trans[2] = lf->trans_radius; light_.trans[3] = lf->trans_soft;
-        for (int k = 0; k < 3; k++) { light_.trans_rgb[k] = lf->trans_rgb[k]; light_.trans_c[k] = lf->trans_centre[k]; }
-    }
-    if (lf->fine_textures && filter_ == TextureFilter::smooth) { light_.tex[0] = 1.f; light_.tex[1] = 0.25f; }
 }
 // A target's passes in one render pass (metal_device.mm flush). Multisample: the passes draw into the multisample
 // attachments, which the render pass resolves into color and depth at its end; a transient target's attachments cannot be
@@ -830,7 +811,7 @@ void VulkanDevice::encode_rec(const Target &t, const Rec &r) {
         const VkSampler samp[2] = {sampler(d.samp[0]), sampler(d.samp[1])};
         const VkImageView tex[2] = {r.tex[2 * i], r.tex[2 * i + 1]};
         if (!s1 || tex[0] != last_tex[0] || tex[1] != last_tex[1] || samp[0] != last_samp[0] || samp[1] != last_samp[1]) {
-            s1 = texture_set(tex, samp);
+            s1 = texture_set(r, tex, samp);
             if (!s1) continue;
             last_tex[0] = tex[0]; last_tex[1] = tex[1]; last_samp[0] = samp[0]; last_samp[1] = samp[1];
         }
@@ -842,14 +823,14 @@ void VulkanDevice::encode_rec(const Target &t, const Rec &r) {
         vkCmdDraw(cmd_, d.vertex_count, 1, d.first_vertex, 0);
     }
 }
-// set 1: the draw's two textures and the placeholders of the maps Task 3 renders
-VkDescriptorSet VulkanDevice::texture_set(const VkImageView tex[2], const VkSampler samp[2]) {
+// set 1: the draw's two textures, the pass's maps (or their placeholders) and the placeholder environment cubes
+VkDescriptorSet VulkanDevice::texture_set(const Rec &r, const VkImageView tex[2], const VkSampler samp[2]) {
     VkDescriptorSet s = alloc_set(set1_layout_);
     if (!s) return VK_NULL_HANDLE;
     const VkImageLayout rd = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     const VkDescriptorImageInfo ii[8] = {
-        {samp[0], tex[0], rd}, {samp[1], tex[1], rd}, {compare_sampler_, depth_ph_.view, rd}, {depth_linear_ ? linear_clamp_ : nearest_, depth_ph_.view, rd},
-        {linear_clamp_, ao_ph_.view, rd}, {linear_clamp_, env_ph_.view, rd}, {linear_clamp_, env_ph_.view, rd}, {nearest_, depth_ph_.view, rd}};
+        {samp[0], tex[0], rd}, {samp[1], tex[1], rd}, {compare_sampler_, r.shadow, rd}, {depth_linear_ ? linear_clamp_ : nearest_, r.under, rd},
+        {linear_clamp_, r.ao, rd}, {linear_clamp_, env_ph_.view, rd}, {linear_clamp_, env_ph_.view, rd}, {nearest_, r.foot, rd}};
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     w.dstSet = s;
     w.dstBinding = 0;
