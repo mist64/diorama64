@@ -9,7 +9,9 @@
 // the Android looper through qx_app_set_pump's callback) until the platform stops or a quit is asked for.
 #include "vos_api.h"
 #include "qx_app.h"
+#if defined(__ANDROID__)
 #include <android_native_app_glue.h>
+#endif
 #include <sys/stat.h>
 #include <time.h>
 #include <algorithm>
@@ -1008,7 +1010,9 @@ extern "C" void arvos_layer_run(void *) {
     AppState &s = state();
     std::lock_guard<std::mutex> run(s.run);
     if (!s.options_ok) { ar::vos_log("AR_ERROR not starting: %s", s.error.c_str()); return; }
+#if defined(__ANDROID__)
     if (!s.app) { ar::vos_log("AR_ERROR not starting: no android_app (qx_app_set_android)"); return; }
+#endif
     s.loop_thread = std::this_thread::get_id();
     struct LoopEnd { ~LoopEnd() { state().loop_thread = std::thread::id(); } } loop_end;
     s.quit = false;
@@ -1024,7 +1028,9 @@ extern "C" void arvos_layer_run(void *) {
         pc.fixed_table_valid = s.fixed_table;
         pc.record_path = s.docs + "/placement.json";
         s.platform.reset(new ar::QxPlatform(s.app, pc));
+#if defined(__ANDROID__)
         s.app->userData = s.platform.get();
+#endif
     }
     s.platform->set_paused(s.background);
     std::string err;
@@ -1205,6 +1211,8 @@ extern "C" void arvos_layer_run(void *) {
     prefs_flush("loop end");
     s.live = nullptr;
     s.session.reset();
+#if defined(__ANDROID__)
     s.app->userData = nullptr;
+#endif
     s.platform.reset();
 }

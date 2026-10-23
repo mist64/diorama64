@@ -36,6 +36,7 @@
           cmake ninja gnumake pkg-config python3 jdk17 imagemagick libarchive
           SDL2 glew zlib vulkan-headers vulkan-loader vulkan-validation-layers
           vulkan-tools mesa git
+          monado libpulseaudio   # desktop OpenXR testing without a headset (scripts/desktop_xr.py)
           android.androidsdk
         ];
         shellHook = ''
@@ -51,6 +52,7 @@
           export SM64AR_OPENXR_DIR="${openxr-sdk}"
           export SM64AR_GLSLANG_DIR="${glslang}"
           export VK_DRIVER_FILES="${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json"
+          export SM64AR_MONADO_JSON="${pkgs.monado}/share/openxr/1/openxr_monado.json"
         '';
       };
     };

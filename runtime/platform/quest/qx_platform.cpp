@@ -1,7 +1,9 @@
 #include "qx_platform.h"
-#include <jni.h>
 #include <vulkan/vulkan.h>
+#if defined(__ANDROID__)
+#include <jni.h>
 #include <android_native_app_glue.h>
+#endif
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
 #include <math.h>
@@ -190,6 +192,7 @@ struct QxPlatform::Impl {
 };
 
 bool QxPlatform::Impl::create_instance(std::string *err) {
+#if defined(__ANDROID__)
     PFN_xrVoidFunction fn = nullptr;
     if (!ok(xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR", &fn), "xrGetInstanceProcAddr(xrInitializeLoaderKHR)", err))
         return false;
@@ -199,6 +202,7 @@ bool QxPlatform::Impl::create_instance(std::string *err) {
     li.applicationContext = app->activity->clazz;
     if (!ok(ext.initialize_loader(reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR *>(&li)), "xrInitializeLoaderKHR", err))
         return false;
+#endif
 
     uint32_t n = 0;
     if (!ok(xrEnumerateInstanceExtensionProperties(nullptr, 0, &n, nullptr), "xrEnumerateInstanceExtensionProperties", err))
@@ -207,7 +211,11 @@ bool QxPlatform::Impl::create_instance(std::string *err) {
     if (!ok(xrEnumerateInstanceExtensionProperties(nullptr, n, &n, avail.data()), "xrEnumerateInstanceExtensionProperties", err))
         return false;
     avail.resize(n);
+#if defined(__ANDROID__)
     std::vector<const char *> want = {XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
+#else   // the desktop build (Monado): no Android instance info
+    std::vector<const char *> want = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
+#endif
     for (const char *w : want)
         if (!has_ext(avail, w)) return fail("xrCreateInstance", std::string("runtime lacks ") + w, err);
     has_passthrough_ext = has_ext(avail, XR_FB_PASSTHROUGH_EXTENSION_NAME);
@@ -229,11 +237,13 @@ bool QxPlatform::Impl::create_instance(std::string *err) {
     vos_log("AR_QUEST_EXT passthrough=%d refresh=%d scene=%d capture=%d", has_passthrough_ext ? 1 : 0, has_refresh_ext ? 1 : 0,
             has_scene_ext ? 1 : 0, has_capture_ext ? 1 : 0);
 
+    XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
+#if defined(__ANDROID__)
     XrInstanceCreateInfoAndroidKHR ai{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     ai.applicationVM = app->activity->vm;
     ai.applicationActivity = app->activity->clazz;
-    XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
     ci.next = &ai;
+#endif
     strncpy(ci.applicationInfo.applicationName, "Diorama64", XR_MAX_APPLICATION_NAME_SIZE - 1);
     ci.applicationInfo.applicationVersion = 1;
     strncpy(ci.applicationInfo.engineName, "sm64ar", XR_MAX_ENGINE_NAME_SIZE - 1);
@@ -796,7 +806,15 @@ void QxPlatform::Impl::destroy() {
     if (swapchain != XR_NULL_HANDLE) xrDestroySwapchain(swapchain);
     if (app_space != XR_NULL_HANDLE) xrDestroySpace(app_space);
     if (session != XR_NULL_HANDLE) {
-        if (session_running) xrEndSession(session);
+        // xrEndSession is only valid in STOPPING: ask the runtime to exit and let poll_events end the session when
+        // STOPPING arrives (bounded); a session still running after that is destroyed as is (valid in any state).
+        if (session_running && ok(xrRequestExitSession(session), "xrRequestExitSession")) {
+            for (int i = 0; i < 100 && session_running && instance != XR_NULL_HANDLE; i++) {
+                poll_events();
+                if (session_running) sleep_ms(5);
+            }
+            if (session_running) vos_log("AR_QUEST_XR session did not reach STOPPING in 500 ms; destroying it running");
+        }
         xrDestroySession(session);
     }
     swapchain = XR_NULL_HANDLE;
@@ -1005,12 +1023,16 @@ bool QxPlatform::start(std::string *err) {
 }
 
 void QxPlatform::handle_cmd(int32_t cmd) {
+#if defined(__ANDROID__)
     switch (cmd) {
     case APP_CMD_RESUME: m_->resumed = true; break;
     case APP_CMD_PAUSE: m_->resumed = false; break;
     case APP_CMD_DESTROY: m_->exit_requested = true; break;
     default: break;
     }
+#else
+    (void)cmd;   // the desktop build has no activity lifecycle
+#endif
 }
 
 void QxPlatform::poll_events() { m_->poll_events(); }
@@ -1048,6 +1070,12 @@ void QxPlatform::request_scene_capture() {
 }
 std::string QxPlatform::scene_hint() const { return m_->placer.hint(); }
 void QxPlatform::set_paused(bool on) { m_->paused.store(on); }
-bool QxPlatform::exiting() const { return m_->exit_requested || m_->app->destroyRequested; }
+bool QxPlatform::exiting() const {
+#if defined(__ANDROID__)
+    return m_->exit_requested || m_->app->destroyRequested;
+#else
+    return m_->exit_requested;
+#endif
+}
 
 }  // namespace ar

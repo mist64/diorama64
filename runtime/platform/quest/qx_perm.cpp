@@ -1,3 +1,4 @@
+#if defined(__ANDROID__)
 #include "qx_perm.h"
 #include <android_native_app_glue.h>
 #include <jni.h>
@@ -73,3 +74,11 @@ bool qx_perm_request(android_app *app, const char *perm) {
 }
 
 }  // namespace ar
+#else
+#include "qx_perm.h"
+// The desktop build (Monado): no runtime permissions; the scene extensions are absent there anyway.
+namespace ar {
+bool qx_perm_granted(android_app *, const char *) { return true; }
+bool qx_perm_request(android_app *, const char *) { return true; }
+}
+#endif

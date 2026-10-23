@@ -80,6 +80,34 @@ bool QxInput::create(XrInstance instance, XrSession session, std::string *err) {
     ps.countSuggestedBindings = (uint32_t)(sizeof sb / sizeof sb[0]);
     ps.suggestedBindings = sb;
     if (!ok(xrSuggestInteractionProfileBindings(instance_, &ps), "xrSuggestInteractionProfileBindings", err)) return false;
+#if !defined(__ANDROID__)
+    // The desktop build: Monado's simulated (qwerty) controllers are Windows Mixed Reality motion controllers. Trackpad
+    // click is A on the right hand and X on the left, the right menu button is B, the right thumbstick click is Y
+    // (Start). Best effort.
+    const Binding wmr[] = {
+        {stick_, "/user/hand/left/input/thumbstick"},        {stick_, "/user/hand/right/input/thumbstick"},
+        {stick_click_, "/user/hand/left/input/thumbstick/click"}, {stick_click_, "/user/hand/right/input/thumbstick/click"},
+        {trigger_, "/user/hand/left/input/trigger/value"},   {trigger_, "/user/hand/right/input/trigger/value"},
+        {squeeze_, "/user/hand/left/input/squeeze/click"},   {squeeze_, "/user/hand/right/input/squeeze/click"},
+        {aim_, "/user/hand/left/input/aim/pose"},            {aim_, "/user/hand/right/input/aim/pose"},
+        {x_, "/user/hand/left/input/trackpad/click"},        {menu_, "/user/hand/left/input/menu/click"},
+        {a_, "/user/hand/right/input/trackpad/click"},       {b_, "/user/hand/right/input/menu/click"},
+        {y_, "/user/hand/right/input/thumbstick/click"},
+    };
+    XrActionSuggestedBinding wb[sizeof wmr / sizeof wmr[0]];
+    bool paths_ok = true;
+    for (size_t i = 0; i < sizeof wmr / sizeof wmr[0]; i++) {
+        wb[i].action = wmr[i].action;
+        paths_ok = paths_ok && ok(xrStringToPath(instance_, wmr[i].path, &wb[i].binding), "xrStringToPath(wmr binding)");
+    }
+    XrInteractionProfileSuggestedBinding wp{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    if (paths_ok && ok(xrStringToPath(instance_, "/interaction_profiles/microsoft/motion_controller", &wp.interactionProfile),
+                       "xrStringToPath(motion_controller)")) {
+        wp.countSuggestedBindings = (uint32_t)(sizeof wb / sizeof wb[0]);
+        wp.suggestedBindings = wb;
+        ok(xrSuggestInteractionProfileBindings(instance_, &wp), "xrSuggestInteractionProfileBindings(motion_controller)");
+    }
+#endif
 
     for (int h = 0; h < 2; h++) {
         XrActionSpaceCreateInfo ci{XR_TYPE_ACTION_SPACE_CREATE_INFO};
