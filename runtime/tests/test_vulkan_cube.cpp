@@ -74,6 +74,11 @@ int main() {
     CHECK(dev->supported_samples(4, 2) == 1);
     run(1);
     CHECK(dev->read_target(target, rgba, w, h) && px(128, 200)[3] == 255 && px(2, 2)[3] == 0);
+    // a resize after the refusal asks for the supported count (1): single-sample rendering continues
+    dev->resize_target(target, 256, 256, 2, dev->supported_samples(4, 2));
+    CHECK(dev->target_samples(target) == 1);
+    run(1);
+    CHECK(dev->read_target(target, rgba, w, h) && w == 256 && h == 256 && px(128, 200)[3] == 255 && px(2, 2)[3] == 0);
     ar_runtime_destroy(rt); dev.reset(); vk_host_destroy(init);
     return 0;
 }

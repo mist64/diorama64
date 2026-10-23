@@ -38,6 +38,7 @@ public:
     bool external_view(uint32_t i, ExternalView *out) const;   // color = &QxSwapchainImage, slice i, viewport full size, linearize per format
     bool color_wants_linear() const;
     uint32_t swapchain_width() const; uint32_t swapchain_height() const;
+    void set_depth_written(bool written);   // before end_submission: false when the device left the depth image unwritten (no depth info is chained)
     void end_submission();                  // after the GPU work is submitted: release the swapchain image, xrEndFrame; a no-op when this frame had no xrBeginFrame (session not running)
     bool exiting() const;
     const ar_frame_info &last_frame() const;   // what the last wait_frame (called by the runtime's begin_frame) returned

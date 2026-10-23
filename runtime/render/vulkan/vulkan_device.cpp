@@ -186,6 +186,16 @@ void VulkanDevice::detect_msaa(bool any_depth_mode) {
         depth_resolve_ = dm;
         stencil_resolve_ = sm;
     }
+    static bool modes_logged = false;
+    if (!modes_logged && create_rp2_ && dsr_ext && props2) {
+        modes_logged = true;
+        VkPhysicalDeviceDepthStencilResolveProperties lp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES};
+        VkPhysicalDeviceProperties2 lp2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        lp2.pNext = &lp;
+        props2(phys_, &lp2);
+        vos_log("AR_VULKAN resolve_modes depth=0x%x stencil=0x%x independent_none=%d independent=%d", (unsigned)lp.supportedDepthResolveModes,
+                (unsigned)lp.supportedStencilResolveModes, (int)lp.independentResolveNone, (int)lp.independentResolve);
+    }
     static bool logged = false;
     if (!depth_resolve_ && !logged) { vos_log("AR_VULKAN depth_resolve=0"); logged = true; }
     for (uint32_t s : {2u, 4u})
@@ -419,6 +429,7 @@ void VulkanDevice::begin_frame() {
     collect_warmed();
     if (frame_open_) return;
     frame_ok_ = false;   // true only once the frame's command buffer is open
+    depth_written_ = true;
     if (!ok_) return;
     slot_ = (slot_ + 1) % kFrames;
     Frame &f = frames_[slot_];
@@ -860,6 +871,7 @@ bool VulkanDevice::record_resolve(uint32_t src, const ExternalView &dst) {
     if (di && !s.depth_sample) {
         if (!depth_sample_warned_) vos_log("AR_VULKAN resolve: target depth is not sampleable here: colour only");
         depth_sample_warned_ = true;
+        depth_written_ = false;
         di = nullptr;
     }
     VkRenderPass rp = resolve_render_pass(ci.format, di ? di->format : VK_FORMAT_UNDEFINED);
@@ -1017,5 +1029,6 @@ std::unique_ptr<IRenderDevice> create_vulkan_device(const VulkanDeviceInit &init
     return d;
 }
 bool vulkan_device_frame_ok(IRenderDevice &d) { return static_cast<vkd::VulkanDevice &>(d).frame_ok(); }
+bool vulkan_device_depth_written(IRenderDevice &d) { return static_cast<vkd::VulkanDevice &>(d).depth_written(); }
 void vulkan_device_accept_any_depth_resolve(IRenderDevice &d) { static_cast<vkd::VulkanDevice &>(d).accept_any_depth_resolve(); }
 }

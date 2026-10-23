@@ -382,6 +382,7 @@ bool QxSession::frame() {
         ar_runtime_submit_frame(rt_, &none);
     }
     dev_->end_frame(on_done, new Done{rt_, rf}, nullptr);   // vkQueueSubmit before the image is released
+    platform_.set_depth_written(vulkan_device_depth_written(*dev_));
     platform_.end_submission();
     for (std::string why; dev_->take_pipeline_error(&why);)
         vos_log("AR_ERROR pipeline refused: %s (MSAA now %u)", why.c_str(), dev_->supported_samples(4, layers_));

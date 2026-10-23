@@ -130,6 +130,7 @@ public:
     ~VulkanDevice() override;
     bool ok() const { return ok_; }
     bool frame_ok() const { return frame_ok_; }
+    bool depth_written() const { return depth_written_; }
     void accept_any_depth_resolve();
 
     // textures and samplers (vk_textures.cpp)
@@ -390,6 +391,7 @@ private:
     uint32_t slot_ = 0;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;   // the open frame's
     bool frame_open_ = false;
+    bool depth_written_ = true;              // vulkan_device_depth_written
     bool frame_ok_ = false;                  // vulkan_device_frame_ok
     uint64_t frame_serial_ = 0;              // the last frame begun
     uint32_t encoders_ = 0, encoders_last_ = 0;

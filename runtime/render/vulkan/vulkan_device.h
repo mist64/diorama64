@@ -29,6 +29,10 @@ std::unique_ptr<IRenderDevice> create_vulkan_device(const VulkanDeviceInit &init
 // False when anything in the open (or last) frame could not be vouched for: begin_frame failed, a target has no images
 // after a (re)size, or an encode_resolve recorded nothing. Reset by each begin_frame. d must come from create_vulkan_device.
 bool vulkan_device_frame_ok(IRenderDevice &d);
+// True when every resolve this frame that was given an external depth image wrote it (also when none was given).
+// False: the target's depth was not sampleable, so only colour was written. Reset by each begin_frame. d must come from
+// create_vulkan_device.
+bool vulkan_device_depth_written(IRenderDevice &d);
 // For host tests: accept a depth resolve mode other than MAX (lavapipe offers SAMPLE_ZERO only), so supported_samples can
 // exceed 1 and the multisample path runs there. Call before creating multisample targets. d must come from
 // create_vulkan_device.

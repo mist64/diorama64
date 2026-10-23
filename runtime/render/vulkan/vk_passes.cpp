@@ -388,6 +388,7 @@ bool VulkanDevice::bake_ao(uint32_t slot, const AoVolume &vol, const std::vector
         jobs_.push_back(Job{frame_serial_, k.fence, k.queries, nullptr, nullptr, gen});
     }
     cv_.notify_all();
+    if (ao_bound_ == ao_[slot].view) ao_bound_ = VK_NULL_HANDLE;
     if (ao_[slot].img) retire_image(ao_[slot]);   // recorded or in-flight passes may still sample the old volume
     ao_[slot] = k.out;
     ao_vol_[slot] = vol;

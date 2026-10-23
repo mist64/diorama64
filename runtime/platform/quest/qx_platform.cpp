@@ -132,6 +132,8 @@ struct QxPlatform::Impl {
     bool perm_was_focused = false;     // the session was focused after the request
     bool perm_left_focus = false;      // and then lost focus (the dialog took it)
     bool scene_queried_once = false;   // the first query was requested
+    bool scene_focus_lost = false;     // focus was lost after the first query: re-query when it returns (Space Setup)
+    bool depth_written = true;         // the device wrote this frame's depth (QxSession::frame sets it); else no depth info
     bool capture_pending = false;      // request_scene_capture before the permission was granted
     XrTime last_scene_time = 0;
     std::string hint_logged;
@@ -621,7 +623,7 @@ void QxPlatform::Impl::end_frame() {
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         depth_released = ok(xrReleaseSwapchainImage(depth_swapchain, &ri), "xrReleaseSwapchainImage(depth)");
     }
-    const bool with_depth = depth_released && released;
+    const bool with_depth = depth_released && released && depth_written;
     XrCompositionLayerPassthroughFB pt_layer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
     XrCompositionLayerProjectionView pviews[kEyes];
     XrCompositionLayerDepthInfoKHR dviews[kEyes];   // chained from pviews[].next; both live until xrEndFrame returns
@@ -671,6 +673,7 @@ void QxPlatform::Impl::end_frame() {
     fe.layers = layer_count ? layers : nullptr;
     ok(xrEndFrame(session, &fe), "xrEndFrame");
     waited = begun = acquired = depth_acquired = submit_valid = false;
+    depth_written = true;   // the next frame's session says otherwise
 }
 
 // This frame's controller sample (locate: the session is running and xrWaitFrame gave t). xrSyncActions only while
@@ -748,6 +751,15 @@ void QxPlatform::Impl::update_scene(const ar_frame_info &fi) {
         if (!scene_queried_once) {
             scene_queried_once = true;
             scene.request_query();
+        }
+        // Space Setup from the system menu changes the scan without our capture request: read it again on return. The
+        // scene keeps one query in flight and issues this one when the pending one completes.
+        if (state != XR_SESSION_STATE_FOCUSED) {
+            if (scene_queried_once) scene_focus_lost = true;
+        } else if (scene_focus_lost) {
+            scene_focus_lost = false;
+            scene.request_query();
+            vos_log("AR_QUEST_SCENE query=requested reason=focus");
         }
         if (capture_pending) {
             capture_pending = false;
@@ -1018,6 +1030,7 @@ bool QxPlatform::color_wants_linear() const { return m_->linearize; }
 uint32_t QxPlatform::swapchain_width() const { return m_->width; }
 uint32_t QxPlatform::swapchain_height() const { return m_->height; }
 void QxPlatform::end_submission() { m_->end_frame(); }
+void QxPlatform::set_depth_written(bool written) { m_->depth_written = written; }
 const ar_frame_info &QxPlatform::last_frame() const { return m_->last_info; }
 const QxActionState &QxPlatform::actions() const { return m_->actions; }
 const QxActionState &QxPlatform::actions_before() const { return m_->actions_before; }
