@@ -2,6 +2,7 @@
 import functools, os, pathlib, plistlib, re, shutil, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+IS_MAC = sys.platform == "darwin"
 PIN = "8cd6e5977d9f920d51ca71f2c61801d019ed79c6"
 UPSTREAM = ROOT / "games" / "sm64" / "upstream"
 # Overridable so tests can prepare a throwaway copy without touching the live worktree.
@@ -12,6 +13,12 @@ MIN_XCODE, TESTED_XCODE = 26, "26.3"
 BUILD_FLAGS = ["DISCORD_SDK=0", "COOPNET=0", "UPDATER=0", "USE_APP=0"]
 # Homebrew formulae the build needs (make: GNU make, since upstream's Makefile needs more than macOS's make 3.81).
 FORMULAE = ("cmake", "ninja", "make", "sdl2", "glew")
+# Linux (the Nix dev shell): the programs on PATH and the pkg-config modules the oracle build and pack prep need.
+LINUX_TOOLS = ("cmake", "ninja", "make", "pkg-config", "magick", "bsdtar")
+LINUX_PKGS = ("sdl2", "glew")
+HARNESS = ROOT / "build" / "macos" / "harness" / "bin" / "sm64ar_harness"
+PACK_TOOL = ROOT / "build" / "host" / "pack_tool" / "sm64ar_pack_tool"
+RES_DIR = SRC / "build" / "us_pc"
 
 
 def _selected_xcode():
@@ -29,7 +36,7 @@ def developer_folder(path):
     return path
 
 
-DEVELOPER_DIR = developer_folder(os.environ.get("DEVELOPER_DIR") or _selected_xcode())
+DEVELOPER_DIR = developer_folder(os.environ.get("DEVELOPER_DIR") or (_selected_xcode() if IS_MAC else ""))
 BREW_PLACES = ("/opt/homebrew/bin/brew", "/usr/local/bin/brew")
 
 
@@ -78,6 +85,8 @@ def require_xcode():
 
 def env():
     e = dict(os.environ)
+    if not IS_MAC:
+        return e
     e["DEVELOPER_DIR"] = require_xcode()
     brew = find_brew()
     if brew and str(pathlib.Path(brew).parent) not in e.get("PATH", "").split(":"):
@@ -96,3 +105,36 @@ def missing_formulae(names=FORMULAE, brew=None):
     def listed(*n):
         return subprocess.run([brew, "list", "--versions", *n], capture_output=True).returncode == 0
     return [] if listed(*names) else [n for n in names if not listed(n)]
+
+
+def tool_problems():
+    """What the host lacks for the oracle build and pack prep. macOS: the missing Homebrew formulae (RuntimeError without
+    Homebrew). Linux: the programs missing from PATH and the pkg-config modules pkg-config cannot find."""
+    if IS_MAC:
+        return missing_formulae()
+    missing = [n for n in LINUX_TOOLS if not shutil.which(n)]
+    if shutil.which("pkg-config"):
+        missing += [m for m in LINUX_PKGS if subprocess.run(["pkg-config", "--exists", m]).returncode]
+    else:
+        missing += list(LINUX_PKGS)
+    return missing
+
+
+def make_program():
+    """GNU make: Homebrew installs it as gmake (macOS's own make is 3.81); on Linux make is GNU make."""
+    return "gmake" if shutil.which("gmake") else "make"
+
+
+def pack_generator_cmd(rom, scratch):
+    """The command that boots the game headlessly for DynOS's generators (the caller appends --generate-tex/-actors)."""
+    if IS_MAC:
+        return [str(HARNESS), "--offscreen", "--out", str(scratch), "--rom", str(rom)]
+    return [str(PACK_TOOL), "--rom", str(rom), "--res", str(RES_DIR)]
+
+
+def resize_png_cmd(src, dst, cap):
+    """Re-encode src as a PNG at dst, scaled down to fit cap x cap when cap is given."""
+    if IS_MAC:
+        return (["/usr/bin/sips", "-Z", str(cap), str(src), "--out", str(dst)] if cap
+                else ["/usr/bin/sips", "-s", "format", "png", str(src), "--out", str(dst)])
+    return ["magick", str(src), "-resize", f"{cap}x{cap}>", f"png:{dst}"] if cap else ["magick", str(src), f"png:{dst}"]

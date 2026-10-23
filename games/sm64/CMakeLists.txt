@@ -22,6 +22,24 @@ if(SM64AR_VISIONOS)
   # OSX_BUILD means desktop macOS (SDL2/GL). Dropped so a desktop-only #ifdef OSX_BUILD path can never switch on for
   # visionOS.
   list(REMOVE_ITEM SM64_DEFINES OSX_BUILD=1)
+elseif(NOT APPLE)
+  # Embedded library off Apple (Linux host: pack tool and tests; Android: the Quest app). Same exclusions as visionOS:
+  # no SDL backends, curl, or SDL crash handler; nothing is drawn through SDL/GL. miniaudio keeps its defaults (its
+  # backends are opened with dlopen, nothing is linked).
+  list(FILTER SM64_C_SOURCES EXCLUDE REGEX "src/pc/(audio/audio_sdl|controller/controller_sdl|update_checker|crash_handler)\\.c$")
+  set(SM64_SDL sm64_sdl_stub)
+  set(SM64_PLATFORM_DEFINES "")
+  if(ANDROID)
+    set(SM64_PLATFORM_LIBS z log android)
+  else()
+    find_package(Threads REQUIRED)
+    set(SM64_PLATFORM_LIBS z m dl Threads::Threads)
+  endif()
+  set(SM64_ADAPTER_EXTRA adapter/src/link_stubs_visionos.c)
+  # No CommonCrypto off Apple: sm64_pack_stamp.c hashes through sha256_portable.c.
+  set(SM64_ADAPTER_PORTABLE adapter/src/sha256_portable.c)
+  # OSX_BUILD means desktop macOS (SDL2/GL); never on here.
+  list(REMOVE_ITEM SM64_DEFINES OSX_BUILD=1)
 else()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
@@ -47,7 +65,7 @@ target_compile_definitions(sm64_upstream_headers INTERFACE ${SM64_DEFINES} _LANG
 target_include_directories(sm64_upstream_headers INTERFACE
   ${SM64_SRC_DIR}/include ${SM64_GEN_DIR} ${SM64_GEN_DIR}/include ${SM64_SRC_DIR}/src ${SM64_SRC_DIR}
   ${SM64_SRC_DIR}/sound ${LUA_SRC_DIR} ${SM64_SRC_DIR}/lib/coopnet/include)
-if(SM64AR_VISIONOS)
+if(SM64AR_VISIONOS OR NOT APPLE)
   target_include_directories(sm64_upstream_headers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/sdl_stub/include)
 endif()
 
@@ -63,7 +81,19 @@ target_compile_definitions(sm64_lua PRIVATE LUA_USE_POSIX LUA_COMPAT_5_2)
 target_compile_options(sm64_lua PRIVATE -O2 -w)
 set_source_files_properties(${LUA_SRC_DIR}/loslib.c PROPERTIES COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/lua/lua_no_system.h")
 
-add_library(sm64_game STATIC ${SM64_C_SOURCES} ${SM64_CXX_SOURCES})
+# The stubs stand in for upstream modules; only sm64_game references them. GNU ld (Linux host) scans an archive once, in
+# link order, so off Apple they are built into sm64_game (linked whole) instead of the sm64_adapter archive before it.
+# On Apple the adapter's sources stay exactly as they were.
+if(APPLE)
+  set(SM64_GAME_STUBS "")
+  set(SM64_ADAPTER_STUBS adapter/src/link_stubs.c)
+  set(SM64_ADAPTER_TAIL ${SM64_ADAPTER_EXTRA})
+else()
+  set(SM64_GAME_STUBS adapter/src/link_stubs.c ${SM64_ADAPTER_EXTRA})
+  set(SM64_ADAPTER_STUBS "")
+  set(SM64_ADAPTER_TAIL ${SM64_ADAPTER_PORTABLE})
+endif()
+add_library(sm64_game STATIC ${SM64_C_SOURCES} ${SM64_CXX_SOURCES} ${SM64_GAME_STUBS})
 target_compile_options(sm64_game PRIVATE -fno-strict-aliasing -fwrapv -fsigned-char -O2 -w)
 # PRIVATE on a static library still propagates the link dependencies ($<LINK_ONLY:...>), not the compile state.
 target_link_libraries(sm64_game PRIVATE sm64_upstream_headers ${SM64_SDL} sm64_lua ${SM64_PLATFORM_LIBS})
@@ -72,7 +102,7 @@ add_library(sm64_audio_logic STATIC adapter/src/sfx_lanes.c adapter/src/sm64_rel
             adapter/src/sm64_event_music.c)
 target_include_directories(sm64_audio_logic PUBLIC adapter/include)
 target_link_libraries(sm64_audio_logic PUBLIC ar_core)
-add_library(sm64_adapter STATIC adapter/src/sm64_host.c adapter/src/link_stubs.c adapter/src/ar_network_null.c adapter/src/ground_height.c adapter/src/ar_controller.c adapter/src/pad_map.c adapter/src/gfx_capture_api.c adapter/src/shading_view.c adapter/src/ar_adapter_sm64.c adapter/src/ar_setup.c adapter/src/sm64_ar_view.c adapter/src/ar_game_hooks.c adapter/src/ar_audio.c adapter/src/ar_hud.c adapter/src/ar_hud_logic.c adapter/src/ar_pip.c adapter/src/sm64_pip.c adapter/src/ar_cannon.c adapter/src/ar_cannon_frame.c adapter/src/ar_trees.c adapter/src/ar_loop.c adapter/src/sm64_levels.c adapter/src/sm64_vis.c adapter/src/sm64_light.c adapter/src/sm64_packs.c adapter/src/sm64_story.c adapter/src/sm64_touch.c adapter/src/sm64_eyes.c adapter/src/sm64_settings.c adapter/src/sm64_look.c adapter/src/ar_look.c adapter/src/sm64_rooms.c adapter/src/sm64_pack_stamp.c ${SM64_ADAPTER_EXTRA})
+add_library(sm64_adapter STATIC adapter/src/sm64_host.c ${SM64_ADAPTER_STUBS} adapter/src/ar_network_null.c adapter/src/ground_height.c adapter/src/ar_controller.c adapter/src/pad_map.c adapter/src/gfx_capture_api.c adapter/src/shading_view.c adapter/src/ar_adapter_sm64.c adapter/src/ar_setup.c adapter/src/sm64_ar_view.c adapter/src/ar_game_hooks.c adapter/src/ar_audio.c adapter/src/ar_hud.c adapter/src/ar_hud_logic.c adapter/src/ar_pip.c adapter/src/sm64_pip.c adapter/src/ar_cannon.c adapter/src/ar_cannon_frame.c adapter/src/ar_trees.c adapter/src/ar_loop.c adapter/src/sm64_levels.c adapter/src/sm64_vis.c adapter/src/sm64_light.c adapter/src/sm64_packs.c adapter/src/sm64_story.c adapter/src/sm64_touch.c adapter/src/sm64_eyes.c adapter/src/sm64_settings.c adapter/src/sm64_look.c adapter/src/ar_look.c adapter/src/sm64_rooms.c adapter/src/sm64_pack_stamp.c ${SM64_ADAPTER_TAIL})
 target_include_directories(sm64_adapter PUBLIC adapter/include)
 target_compile_options(sm64_adapter PRIVATE -fsigned-char)
 # sm64_game has __attribute__((constructor)) ROM-asset registrations in objects nothing references;

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """scripts/packs.py — optional HD texture and 3D model packs. Packs are untrusted fan-made data derived from
 Nintendo's assets: they live only in local/packs/ (git-ignored), are never committed, redistributed, executed or imported.
-Always run as `python3 -I scripts/packs.py ...` (no sm64ar_common: nothing from a pack's folder can be imported).
+Always run as `python3 -I scripts/packs.py ...` (nothing from a pack's folder can be imported: the one helper module,
+scripts/sm64ar_common.py, is loaded by its explicit path).
 
   python3 -I scripts/packs.py pin-from-sources            # local/packs/SOURCES.md -> local/packs/manifest.json (local only)
   python3 -I scripts/packs.py list                        # the pinned packs and what is prepared
   python3 -I scripts/packs.py fetch ID                    # download (official pin, or your SOURCES.md row) if missing, check the SHA-256, extract safely
-  python3 -I scripts/packs.py prepare ID                  # texture pack: filter, validate, resize (sips), .tex via the harness, verify
+  python3 -I scripts/packs.py prepare ID                  # texture pack: filter, validate, resize (sips/magick), .tex via the harness/pack tool, verify
   python3 -I scripts/packs.py prepare ID [--with-bowser] [--no-mario]   # model pack: curated bins walked, PNGs re-encoded, verify
   python3 -I scripts/packs.py prepare render96-models-balanced   # variant: per-actor mix of two prepared packs by cost, verify
                                                           # (needs local/packs/actor_costs.json: python3 scripts/pack_costs.py)
@@ -14,9 +15,24 @@ Always run as `python3 -I scripts/packs.py ...` (no sm64ar_common: nothing from 
   python3 -I scripts/packs.py report                      # the decoded MB of every prepared pack (from its .verified.json)
   python3 -I scripts/packs.py stage-harness SAVE          # SAVE/dynos/packs/<name> -> the verified prepared folders
 """
-import hashlib, json, os, pathlib, re, shutil, stat, struct, subprocess, sys, tempfile, urllib.request, zipfile, zlib
+import hashlib, importlib.util, json, os, pathlib, re, shutil, stat, struct, subprocess, sys, tempfile, urllib.request, \
+    zipfile, zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def _load_common():
+    """scripts/sm64ar_common.py by its explicit path (-I leaves scripts/ off sys.path, and nothing else is searched)."""
+    if "sm64ar_common" in sys.modules:
+        return sys.modules["sm64ar_common"]
+    spec = importlib.util.spec_from_file_location("sm64ar_common", ROOT / "scripts" / "sm64ar_common.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["sm64ar_common"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+common = _load_common()
 PACKS = ROOT / "local" / "packs"
 MANIFEST = PACKS / "manifest.json"
 SOURCES = PACKS / "SOURCES.md"
@@ -58,7 +74,7 @@ ALLOWED_EXT = {".png", ".bin", ".tex", ".txt", ".md"}
 MAX_MEMBERS = 10000
 MAX_UNPACKED = 4 << 30
 MAX_ARCHIVE = 1 << 30
-BSDTAR = "/usr/bin/bsdtar"
+BSDTAR = shutil.which("bsdtar") or "/usr/bin/bsdtar"
 
 
 class Refused(Exception):
@@ -289,9 +305,7 @@ KEEP_SYMBOL_PREFIXES = ("texture_menu_font_char_",)
 def dropped(rel, symbol):
     return rel.startswith(DROP_PREFIXES) and not symbol.startswith(KEEP_SYMBOL_PREFIXES)
 SRC = ROOT / "build" / "_src" / "sm64"
-HARNESS = ROOT / "build" / "macos" / "harness" / "bin" / "sm64ar_harness"
 ROM = ROOT / "local" / "baserom.us.z64"
-SIPS = "/usr/bin/sips"
 TEX_MAX = 1024
 
 
@@ -380,14 +394,17 @@ def target_size(n64_w, n64_h, png_w, png_h):
     return cap if max(png_w, png_h) > cap else 0
 
 
-def _sips(args, dst):
-    r = subprocess.run([SIPS, *args, "--out", str(dst)], capture_output=True)
+def _resize_png(src, dst, cap):
+    """src re-encoded as a PNG at dst (scaled down to cap when cap is given): sips on macOS, ImageMagick on Linux."""
+    cmd = common.resize_png_cmd(src, dst, cap)
+    r = subprocess.run(cmd, capture_output=True)
     if r.returncode:
-        raise Refused(f"sips failed: {r.stderr.decode('utf-8', 'replace')[:200]}")
+        raise Refused(f"{os.path.basename(cmd[0])} failed: {r.stderr.decode('utf-8', 'replace')[:200]}")
 
 
-def prepare_textures(pid, entry, harness=HARNESS, rom=ROM, src=SRC):
-    """Every kept PNG is re-encoded through sips (resized when over target_size), so no raw pack PNG byte reaches the harness's stb."""
+def prepare_textures(pid, entry, rom=ROM, src=SRC):
+    """Every kept PNG is re-encoded through sips/magick (resized when over target_size), so no raw pack PNG byte reaches the
+    generator's stb."""
     table = builtin_textures(src)
     root = texture_root(PACKS / pid / "extracted")
     png_dir = PACKS / pid / "png" / entry["name"]
@@ -415,7 +432,7 @@ def prepare_textures(pid, entry, harness=HARNESS, rom=ROM, src=SRC):
             w, h, _, _ = png_info(p.read_bytes())
             dst.parent.mkdir(parents=True, exist_ok=True)
             size = target_size(table[rel][1], table[rel][2], w, h)
-            _sips(["-Z", str(size), str(p)] if size else ["-s", "format", "png", str(p)], dst)
+            _resize_png(p, dst, size or None)
             png_info(dst.read_bytes())
         except Refused as e:
             rep["refused"].append(f"{rel}: {e}")
@@ -426,8 +443,7 @@ def prepare_textures(pid, entry, harness=HARNESS, rom=ROM, src=SRC):
     expected = expected_textures(png_dir, table)
     gen_out = tempfile.mkdtemp(prefix="sm64ar-gen-out-")
     try:
-        subprocess.run([str(harness), "--offscreen", "--out", gen_out, "--rom", str(rom),
-                        "--generate-tex", str(png_dir), str(out)], check=True)
+        subprocess.run(common.pack_generator_cmd(rom, gen_out) + ["--generate-tex", str(png_dir), str(out)], check=True)
     finally:
         shutil.rmtree(gen_out, ignore_errors=True)
     missing = sorted(expected - {f.stem for f in out.glob("*.tex")})
@@ -1161,12 +1177,12 @@ def check_bin(data, stem, actors, names=None):
 
 
 def _sips_png(png, cap):
-    """The PNG re-encoded by sips (resized to cap when larger): the only PNG bytes a staged bin carries."""
+    """The PNG re-encoded by sips/magick (resized to cap when larger): the only PNG bytes a staged bin carries."""
     w, h, _, _ = png_info(png)
     with tempfile.TemporaryDirectory(prefix="sm64ar-png-") as d:
         a, b = pathlib.Path(d) / "a.png", pathlib.Path(d) / "b.png"
         a.write_bytes(png)
-        _sips(["-Z", str(cap), str(a)] if max(w, h) > cap else ["-s", "format", "png", str(a)], b)
+        _resize_png(a, b, cap if max(w, h) > cap else None)
         return b.read_bytes()
 
 
