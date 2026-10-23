@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from quest_device import find_device  # noqa: E402
+from quest_device import dev_data_plan, find_device  # noqa: E402
 from quest_package import aapt2_link_cmd  # noqa: E402
 
 
@@ -27,6 +27,13 @@ class QuestScriptTests(unittest.TestCase):
 
     def test_aapt2_link_cmd_no_assets(self):
         self.assertNotIn("-A", aapt2_link_cmd("a", "m", "j", None, "o"))
+
+    def test_dev_data_plan(self):
+        plan = dev_data_plan(Path("/l/rom.z64"), Path("/b/us_pc"), [Path("/p/a"), Path("/p/b")])
+        self.assertEqual(plan[0], (Path("/l/rom.z64"), "/sdcard/Android/data/org.pagetable.diorama64/files/rom.z64"))
+        self.assertIn((Path("/b/us_pc/lang"), "/sdcard/Android/data/org.pagetable.diorama64/files/res/lang"), plan)
+        self.assertIn((Path("/p/b"), "/sdcard/Android/data/org.pagetable.diorama64/files/packs/b"), plan)
+        self.assertEqual(len(plan), 1 + 4 + 2)
 
 
 if __name__ == "__main__":

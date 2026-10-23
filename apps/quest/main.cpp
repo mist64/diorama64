@@ -1,8 +1,14 @@
 #include <android_native_app_glue.h>
 #include <android/looper.h>
+#include <jni.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <string>
+#include "ar_adapter_sm64.h"
+#include "ar_game_args.h"
 #include "cube_adapter.h"
+#include "sm64_ar_setup.h"
+#include "sm64_story.h"
 #include "qx_platform.h"
 #include "qx_session.h"
 #include "vos_log.h"
@@ -30,28 +36,158 @@ void pump(android_app *app, int timeout_ms) {
     }
 }
 
+// The launch intent's extras (adb shell am start -n ... --es game sm64 --es start story --ez fixed_table true).
+struct LaunchExtras {
+    std::string game = "sm64";
+    std::string start = "level";
+    bool fixed_table = true;
+};
+
+LaunchExtras read_extras(ANativeActivity *activity) {
+    LaunchExtras out;
+    JNIEnv *env = nullptr;
+    if (activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        ar::vos_log("AR_QUEST_INTENT no JNI env; defaults");
+        return out;
+    }
+    jobject intent = nullptr;
+    jclass act_cls = env->GetObjectClass(activity->clazz);
+    jmethodID get_intent = env->GetMethodID(act_cls, "getIntent", "()Landroid/content/Intent;");
+    if (get_intent) intent = env->CallObjectMethod(activity->clazz, get_intent);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); intent = nullptr; }
+    if (intent) {
+        jclass intent_cls = env->GetObjectClass(intent);
+        jmethodID get_str = env->GetMethodID(intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;");
+        jmethodID get_bool = env->GetMethodID(intent_cls, "getBooleanExtra", "(Ljava/lang/String;Z)Z");
+        auto str_extra = [&](const char *key, std::string *dst) {
+            if (!get_str) return;
+            jstring k = env->NewStringUTF(key);
+            jstring v = (jstring)env->CallObjectMethod(intent, get_str, k);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); v = nullptr; }
+            if (v) {
+                const char *c = env->GetStringUTFChars(v, nullptr);
+                if (c) { *dst = c; env->ReleaseStringUTFChars(v, c); }
+                env->DeleteLocalRef(v);
+            }
+            env->DeleteLocalRef(k);
+        };
+        str_extra("game", &out.game);
+        str_extra("start", &out.start);
+        if (get_bool) {
+            jstring k = env->NewStringUTF("fixed_table");
+            out.fixed_table = env->CallBooleanMethod(intent, get_bool, k, (jboolean)JNI_TRUE) != JNI_FALSE;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); out.fixed_table = true; }
+            env->DeleteLocalRef(k);
+        }
+        env->DeleteLocalRef(intent_cls);
+        env->DeleteLocalRef(intent);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();   // a missing method leaves NoSuchMethodError pending
+    env->DeleteLocalRef(act_cls);
+    activity->vm->DetachCurrentThread();
+    return out;
+}
+
+bool file_exists(const std::string &path) {
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0;
+}
+
+// The sm64 configuration of vos_app.mm's pick_adapter, reading the data quest_build.py --rom pushed to the app's
+// external files directory: res/ (lang, dynos, palettes, mods) and packs/ (stamped). nullptr (and *err) when the
+// resources are missing or the game is unknown.
+const ar_adapter *pick_adapter(const std::string &game, const std::string &external, std::string *err) {
+    if (game == "cube") return cube_adapter();
+    if (game == "sm64") {
+        const std::string res = external + "/res";
+        if (!file_exists(res + "/lang/English.ini")) {
+            *err = "sm64 resources missing at " + res + "; run quest_build.py --rom";
+            return nullptr;
+        }
+        ar_adapter_sm64_set_resource_dir(res.c_str());   // before the game boots (0002-Library-seams-and-host-hooks.patch)
+        ar_adapter_sm64_set_pack_stamps_required(1);      // only packs staged by quest_build.py (stamp + sha256) load
+        ar_adapter_sm64_set_bundled_pack_dir((external + "/packs").c_str());
+        ar_adapter_sm64_set_screen_log([](int screen, int story, uint32_t tick) {
+            const char *name = sm64_screen_name(screen);
+            ar::vos_log("AR_SCREEN name=%s story=%d tick=%u", name ? name : "?", story, tick);
+        });
+        ar_adapter_sm64_set_dropped_log([](const char *what, const char *why, uint32_t tick) {
+            ar::vos_log("AR_LEVEL dropped %s: %s tick=%u", what, why, tick);
+        });
+        ar_adapter_sm64_set_touch_log([](const char *line, uint32_t tick) { ar::vos_log("AR_TOUCH %s tick=%u", line, tick); });
+        ar_adapter_sm64_set_title_log([](const char *line, uint32_t tick) { ar::vos_log("AR_TITLE %s tick=%u", line, tick); });
+        ar_adapter_sm64_set_title_place_on_request(1);
+        ar_adapter_sm64_set_eyes_log([](const char *line, uint32_t tick) { ar::vos_log("AR_EYES %s tick=%u", line, tick); });
+        ar_adapter_sm64_set_title_eyes_active(1);
+        return ar_adapter_sm64();
+    }
+    *err = "unknown game " + game;
+    return nullptr;
+}
+
+// The setup text vos_app.mm hands ar_adapter_sm64_setup for a launch with no --game-arg: empty for a level start,
+// start=story for a story start. False (and *err) when the setup is refused.
+bool setup_sm64(const std::string &start, std::string *err) {
+    if (start != "level" && start != "story") {
+        *err = "start must be level or story, not " + start;
+        return false;
+    }
+    std::string setup;
+    const char *src = "saved";
+    const int story = sm64_start_resolve(setup.c_str(), start == "story" ? 1 : 0, &src);
+    if (story && sm64_setup_start(setup.c_str()) < 0) setup = ar::setup_with_items(setup, "start=story");
+    ar::vos_log("AR_STORY start=%s source=%s", story ? "story" : "level", src);
+    char why[160];
+    if (!ar_adapter_sm64_setup(setup.c_str(), why, sizeof why)) {
+        *err = std::string("setup: ") + why;
+        return false;
+    }
+    ar::vos_log("AR_SETUP %s", setup.c_str());
+    return true;
+}
+
 }  // namespace
 
 extern "C" void android_main(android_app *app) {
     const std::string internal = app->activity->internalDataPath;
+    // The app's own external files directory: adb pushes the ROM, res/ and packs/ there (quest_build.py --rom).
+    const std::string external = app->activity->externalDataPath ? app->activity->externalDataPath : "";
     ar::vos_log_open((internal + "/sm64ar.log").c_str());
     ar::vos_log("AR_QUEST_START");
+    ar::vos_log("AR_ADAPTERS sm64=%s abi=%u", ar_adapter_sm64()->name, ar_adapter_sm64()->abi_version);
     app->onAppCmd = on_cmd;
+    const LaunchExtras extras = read_extras(app->activity);
+    ar::vos_log("AR_QUEST_INTENT game=%s start=%s fixed_table=%d", extras.game.c_str(), extras.start.c_str(),
+                extras.fixed_table ? 1 : 0);
+
+    // Fallback: the cube, so a missing or refused game still leaves passthrough (and a log line saying why) up.
+    std::string game_name = extras.game, rom;
+    std::string pick_err;
+    const ar_adapter *adapter = pick_adapter(game_name, external, &pick_err);
+    if (adapter && game_name == "sm64" && !setup_sm64(extras.start, &pick_err)) adapter = nullptr;
+    if (!adapter) {
+        ar::vos_log("AR_QUEST_FAIL %s", pick_err.c_str());
+        game_name = "cube";
+        adapter = cube_adapter();
+    }
+    if (game_name == "sm64") rom = external + "/rom.z64";
 
     ar::QxPlatform::Config cfg;
+    // fixed_table (default true) is the only table until the scene table replaces it; false is logged and ignored.
+    if (!extras.fixed_table) ar::vos_log("AR_QUEST_TABLE fixed_table=false not supported yet; using the fixed table");
     cfg.fixed_table = ar_pose_identity();
     cfg.fixed_table.pos[1] = 0.75f;   // table height above the floor; in LOCAL space the platform moves it 1.5 m down
     cfg.fixed_table.pos[2] = -1.0f;
     cfg.fixed_table_valid = true;
     ar::QxPlatform platform(app, cfg);
     app->userData = &platform;
-    ar::QxSession session(cube_adapter(), platform, internal);
+    ar::QxSession session(adapter, platform, internal);
 
     // running: the platform frame loop runs; game: the session drives it (else passthrough only, after a failed start).
     std::string err;
     bool running = platform.start(&err);
     if (!running) ar::vos_log("AR_QUEST_FAIL %s", err.c_str());
-    bool game = running && session.start("", internal + "/save", &err);
+    bool game = running && session.start(rom, internal + "/save", &err);
     if (running && !game) ar::vos_log("AR_QUEST_FAIL %s", err.c_str());
 
     const ar_platform *api = platform.api();
