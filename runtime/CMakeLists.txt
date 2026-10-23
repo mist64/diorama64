@@ -86,7 +86,7 @@ if(SM64AR_HOST_TESTS OR SM64AR_QUEST)
   # The Quest session's portable logic (host-tested): the lighting it builds from the look, the Touch pad and pointer router,
   # the room-scan table and the placement on it, the spatial mode's panner.
   add_library(ar_qx_logic STATIC platform/quest/qx_lighting.cpp platform/quest/qx_input_pure.cpp platform/quest/qx_scene_pure.cpp
-              platform/quest/qx_panner.cpp)
+              platform/quest/qx_panner.cpp platform/quest/qx_prefs.cpp)
   target_include_directories(ar_qx_logic PUBLIC platform/quest)
   target_link_libraries(ar_qx_logic PUBLIC ar_render_common ar_core ar_vos_logic ar_qx_convert)
 
