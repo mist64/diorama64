@@ -25,13 +25,16 @@ public:
     // capture complete). Each event is offered once.
     bool handle_event(const XrEventDataBuffer &ev);
     // Once per frame after xrWaitFrame (t = its predicted display time): issues a pending query or capture, enables
-    // LOCATABLE where needed and locates the anchors in app_space. True when the table list (its uuids) or the floor's
-    // presence changed.
+    // LOCATABLE where needed and locates the anchors in app_space. A completed query's table list is published only
+    // once every TABLE anchor of it is located, or 2 s after the query completed (then what is located; stragglers join
+    // as they locate); until then tables() keeps the previous list. True when the published table list (its uuids) or
+    // the floor's presence changed.
     bool poll(XrSpace app_space, XrTime t);
     const std::vector<QxSceneTable> &tables() const { return tables_; }
     bool floor_known() const { return floor_known_; }
     float floor_y() const { return floor_y_; }
-    bool queried() const { return queried_; }            // a query has completed (the list is the scan's, not "not yet")
+    bool queried() const { return queried_ && published_; }   // a query's list is published (the scan's, not "not yet")
+    bool tables_complete() const { return complete_; }        // the published list holds every TABLE anchor of the scan
     bool started() const { return session_ != XR_NULL_HANDLE; }
     // xrRequestSceneCaptureFB (Space Setup), issued by the next poll; a completed capture re-queries.
     void request_scene_capture();
@@ -74,6 +77,9 @@ private:
     bool floor_known_ = false;
     float floor_y_ = 0.f;
     bool queried_ = false;
+    bool published_ = false;                       // the last completed query's list is published
+    bool complete_ = false;                        // ... and every table anchor of it is located
+    XrTime completed_at_ = 0;                      // the first poll time after the query completed (0: not yet)
     std::string last_uuids_;                       // the uuid list poll last reported, to detect a change
     bool last_floor_ = false;
     std::string last_error_;

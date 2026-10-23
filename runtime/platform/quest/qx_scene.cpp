@@ -164,6 +164,8 @@ bool QxScene::handle_event(const XrEventDataBuffer &ev) {
         query_inflight_ = false;
         if (XR_SUCCEEDED(e->result)) {
             adopt_results();
+            published_ = complete_ = false;   // the new anchors' list waits until they are located
+            completed_at_ = 0;
         } else {   // the last scan's anchors stay; the hint reports no table when there is none
             ok(e->result, "xrQuerySpacesFB (complete)");
             destroy_spaces(&pending_);
@@ -227,8 +229,8 @@ bool QxScene::poll(XrSpace app_space, XrTime t) {
         }
     }
 
-    tables_.clear();
-    bool floor = false;
+    std::vector<QxSceneTable> located;
+    bool floor = false, all = true;
     float fy = 0.f;
     for (auto &a : anchors_) {
         check_locatable(&a);
@@ -241,10 +243,23 @@ bool QxScene::poll(XrSpace app_space, XrTime t) {
                 a.located = true;
             }
         }
-        if (!a.located) continue;   // a lost anchor keeps its last pose once it was located
+        if (!a.located) {   // a lost anchor keeps its last pose once it was located
+            if (a.is_table) all = false;
+            continue;
+        }
         if (a.is_floor && (!floor || a.pose.position.y < fy)) { floor = true; fy = a.pose.position.y; }
-        if (a.is_table) tables_.push_back(qx_table_from_scene(a.uuid, a.pose, a.rect));
+        if (a.is_table) located.push_back(qx_table_from_scene(a.uuid, a.pose, a.rect));
     }
+    constexpr XrTime kPublishTimeout = 2000000000;   // 2 s
+    if (queried_ && !published_) {
+        if (completed_at_ == 0) completed_at_ = t;
+        if (all || t - completed_at_ >= kPublishTimeout) {
+            published_ = true;
+            vos_log("AR_QUEST_SCENE list=published tables=%d complete=%d", (int)located.size(), all ? 1 : 0);
+        }
+    }
+    if (published_ || !queried_) tables_ = std::move(located);   // before any query: empty
+    complete_ = published_ && all;
     floor_known_ = floor;
     floor_y_ = fy;
     std::string uuids;

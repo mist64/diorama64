@@ -24,16 +24,19 @@ float wrap_deg(float a) {
 QxPlacer::QxPlacer(const std::string &record_path) : path_(record_path) {
     PlacementRecord r;
     std::string err;
-    if (placement_load(path_, &r, &err) && qx_placement_from(r, &place_))
+    if (placement_load(path_, &r, &err) && qx_placement_from(r, &record_)) {
+        place_ = record_;
         vos_log("AR_QUEST_PLACE record uuid=%s offset=(%.2f,%.2f) yaw=%.1f", place_.uuid.c_str(), (double)place_.offset_u,
                 (double)place_.offset_v, (double)place_.yaw_deg);
-    else
+    } else {
         vos_log("AR_QUEST_PLACE record none (%s)", err.empty() ? "not a scene table" : err.c_str());
+    }
 }
 
 void QxPlacer::save() {
     std::string err;
-    if (!placement_save(path_, qx_record_from(place_), &err)) vos_log("AR_QUEST_PLACE save failed: %s", err.c_str());
+    if (placement_save(path_, qx_record_from(place_), &err)) record_ = place_;
+    else vos_log("AR_QUEST_PLACE save failed: %s", err.c_str());
 }
 
 void QxPlacer::log_choice() const {
@@ -41,21 +44,22 @@ void QxPlacer::log_choice() const {
             chosen_ >= 0 ? tables_[chosen_].uuid.c_str() : "none");
 }
 
-void QxPlacer::choose_nearest(const ar_pose &head, bool reset) {
-    chosen_ = qx_choose_table(tables_, head, floor_known_, floor_y_);
-    if (chosen_ < 0) return;
-    if (reset || place_.uuid != tables_[chosen_].uuid) {
-        place_.uuid = tables_[chosen_].uuid;
-        place_.offset_u = place_.offset_v = 0.f;   // the yaw is kept: it is the player's, not the table's
-    }
-    save();
+// The nearest candidate, offset reset (the yaw is kept: it is the player's, not the table's). No candidate: chosen_
+// is left as it was. Saved only when save_it (an explicit replace, or a complete list without the remembered table).
+void QxPlacer::choose_nearest(const ar_pose &head, bool save_it) {
+    const int i = qx_choose_table(tables_, head, floor_known_, floor_y_);
+    if (i < 0) return;
+    chosen_ = i;
+    place_.uuid = tables_[i].uuid;
+    place_.offset_u = place_.offset_v = 0.f;
+    if (save_it) save();
 }
 
 void QxPlacer::replace() {
     vos_log("AR_QUEST_PLACE replace");
     if (tables_.empty()) { replace_pending_ = true; return; }
-    if (dragging_) { dragging_ = false; grabbed_ = false; }
-    choose_nearest(head_, true);
+    dragging_ = grabbed_ = false;
+    choose_nearest(head_, true);   // the player asked: saved even from an incomplete list
     log_choice();
 }
 
@@ -69,15 +73,30 @@ void QxPlacer::update(const std::vector<QxSceneTable> &tables, bool floor_known,
     tables_ = tables;   // every frame: the poses follow the re-located anchors
     const bool first_scan = queried_ && !seen_scan_;   // a scan with no table is a list too: log it once
     seen_scan_ = seen_scan_ || queried_;
-    if (uuids != uuids_ || first_scan) {
+    const bool became_complete = complete_ && !was_complete_;   // the list now confirms what it lacks
+    was_complete_ = complete_;
+    if (uuids != uuids_ || first_scan || became_complete) {
         uuids_ = uuids;
+        const std::string current = chosen_ >= 0 ? place_.uuid : std::string();
         chosen_ = -1;
-        if (!replace_pending_)
-            for (size_t i = 0; i < tables_.size(); i++)
-                if (tables_[i].uuid == place_.uuid) chosen_ = (int)i;
-        if (chosen_ < 0 && !tables_.empty()) {
+        int recorded = -1, kept = -1;
+        for (size_t i = 0; i < tables_.size(); i++) {
+            if (!record_.uuid.empty() && tables_[i].uuid == record_.uuid) recorded = (int)i;
+            if (!current.empty() && tables_[i].uuid == current) kept = (int)i;
+        }
+        if (replace_pending_ && !tables_.empty()) {
+            chosen_ = recorded >= 0 ? recorded : kept;   // stays when no table qualifies
             choose_nearest(head, true);
             replace_pending_ = false;
+        } else if (recorded >= 0) {
+            chosen_ = recorded;
+            if (place_.uuid != record_.uuid) place_ = record_;   // the remembered table is (back) in the list
+        } else if (kept >= 0) {
+            chosen_ = kept;                                      // a fallback still in the list stays put
+            if (complete_ && record_.uuid != place_.uuid) save();   // and the complete list confirms the old one is gone
+        } else if (!tables_.empty()) {
+            // The remembered table is absent: saved only when the list is complete (it is really gone).
+            choose_nearest(head, complete_);
         }
         if (chosen_ < 0 && dragging_) dragging_ = grabbed_ = false;
         log_choice();
@@ -131,19 +150,13 @@ bool QxPlacer::preview(ar_preview *out) const {
     out->state = AR_PREVIEW_DRAGGING;
     out->on_plane = 1;
     out->outlines_only = 1;
-    out->tracking_from_preview = t.tracking_from_table;
-    out->outline_count = 1;
-    const float su[4] = {-1.f, 1.f, 1.f, -1.f}, sv[4] = {-1.f, -1.f, 1.f, 1.f};
-    for (int i = 0; i < 4; i++) {
-        const ar_pose corner{{su[i] * t.half_u, 0.f, sv[i] * t.half_v}, {0.f, 0.f, 0.f, 1.f}};
-        const ar_pose w = ar_pose_mul(t.tracking_from_table, corner);
-        for (int k = 0; k < 3; k++) out->outlines[0][i][k] = w.pos[k];
-    }
+    out->tracking_from_preview = qx_place(t, place_);   // the footprint follows the level (vos_platform.mm's drag)
+    out->outline_count = 0;
     return true;
 }
 
 std::string QxPlacer::hint() const {
-    if (denied_) return "Scene permission denied: allow it in Settings > Apps";
+    if (!perm_hint_.empty()) return perm_hint_;
     if (queried_ && chosen_ < 0) return "No table in your room scan. Run Space Setup, then come back.";
     return "";
 }

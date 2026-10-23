@@ -29,6 +29,14 @@ int main() {
     // record round trip
     p.offset_u = 0.1f; p.offset_v = -0.2f; p.yaw_deg = 30.f;
     QxPlacement q; CHECK(qx_placement_from(qx_record_from(p), &q) && q.uuid == "u1" && q.offset_u == 0.1f && q.offset_v == -0.2f && q.yaw_deg == 30.f);
+    // the record through vos_placement.cpp's JSON: a real (36-character hex) scene uuid, as the placer saves it
+    const uint8_t raw[16] = {0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef};
+    p.uuid = qx_uuid_string(raw); CHECK(p.uuid == "12345678-9abc-def0-0123-456789abcdef");
+    PlacementRecord rec; std::string err;
+    CHECK(placement_from_json(placement_to_json(qx_record_from(p)), &rec, &err));
+    QxPlacement j; CHECK(qx_placement_from(rec, &j) && j.uuid == p.uuid && fabsf(j.offset_u - 0.1f) < 1e-5f &&
+                         fabsf(j.offset_v + 0.2f) < 1e-5f && fabsf(j.yaw_deg - 30.f) < 1e-4f);
+    CHECK(qx_has_label("DESK,TABLE", "TABLE") && !qx_has_label("TABLETOP", "TABLE"));
     printf("test_qx_scene ok\n");
     return 0;
 }

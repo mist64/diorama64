@@ -115,7 +115,7 @@ struct QxPlatform::Impl {
     // The room scan and the level's place on it (render thread). The scene query waits for the USE_SCENE permission.
     QxScene scene;
     QxPlacer placer;
-    enum class Perm { unknown, requested, granted, denied } perm = Perm::unknown;
+    enum class Perm { unknown, requested, request_failed, granted, denied } perm = Perm::unknown;
     uint32_t perm_frames = 0;          // frames since the last permission check
     uint32_t perm_focused_frames = 0;  // focused frames since the request
     bool perm_was_focused = false;     // the session was focused after the request
@@ -591,7 +591,16 @@ void QxPlatform::Impl::sample_input(XrTime t, bool locate) {
     else input.clear(t, &actions);
     if (input_focused && !was_focused) actions_before = actions;
     const PointerOwner prev = owner;
-    if (input_focused) decision = qx_route_pointer(prev, actions, actions_before);
+    // A grip drags only a room-scan table that is chosen: otherwise the grips are not routed at all, so they never take
+    // the ray from the game pointer (the placer's validity is the last frame's; update_scene runs after this).
+    const bool draggable = !cfg.fixed_table_valid && placer.valid();
+    if (input_focused && draggable) {
+        decision = qx_route_pointer(prev, actions, actions_before);
+    } else if (input_focused) {
+        QxActionState now = actions, before = actions_before;
+        now.lg = now.rg = before.lg = before.rg = 0.f;
+        decision = qx_route_pointer(prev, now, before);
+    }
     else decision = PointerDecision{PointerOwner::none, false, prev != PointerOwner::none, false};
     owner = decision.owner;
     if (prev == PointerOwner::placer && owner != PointerOwner::placer) {
@@ -650,7 +659,10 @@ void QxPlatform::Impl::update_scene(const ar_frame_info &fi) {
         }
     }
     scene.poll(app_space, t);
-    placer.set_scene_status(scene.queried() || !scene.started(), perm == Perm::denied);
+    const char *perm_hint = perm == Perm::denied           ? "Scene permission denied: allow it in Settings > Apps"
+                            : perm == Perm::request_failed ? "Scene permission request failed: allow it in Settings > Apps"
+                                                           : "";
+    placer.set_scene_status(scene.queried() || !scene.started(), scene.tables_complete() || !scene.started(), perm_hint);
     placer.update(scene.tables(), scene.floor_known(), scene.floor_y(), fi.tracking_from_head, actions, actions_before, decision, dt);
     const std::string h = placer.hint();
     if (h != hint_logged) {
@@ -858,6 +870,9 @@ bool QxPlatform::start(std::string *err) {
             vos_log("AR_QUEST_SCENE permission=granted");
         } else if (qx_perm_request(m_->app, kScenePermission)) {
             m_->perm = Impl::Perm::requested;
+        } else {   // still polled: a grant made in Settings starts the query
+            m_->perm = Impl::Perm::request_failed;
+            vos_log("AR_QUEST_SCENE permission=request_failed");
         }
     }
     return true;
