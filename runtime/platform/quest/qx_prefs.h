@@ -13,7 +13,7 @@ namespace ar {
 class QxPrefs {
 public:
     explicit QxPrefs(const std::string &path);
-    // A missing file succeeds with no keys. A corrupt file fails with a message and leaves the store empty
+    // A missing or empty file succeeds with no keys. A corrupt file fails with a message and leaves the store empty
     // (the caller decides whether to start fresh).
     bool load(std::string *err);
     bool save(std::string *err);
@@ -28,6 +28,7 @@ public:
 private:
     std::string path_;
     mutable std::mutex mu_;
+    std::mutex save_mu_;
     std::map<std::string, std::string> map_;
 };
 
@@ -39,11 +40,10 @@ struct PrefLoadResult {
 // Port of LookLoad.swift:15-40, minus the apply step. For each key: the stored revision is the max of
 // prefix+"defaults_rev" and prefix+"defaults_version" (read once, before the loop); if it is older than new_rev and
 // drop_stored(key, stored, stored_rev, has_launch) says so, the stored value is removed; the value is launch, else
-// stored, else default. A launch value is written to prefix+key. Afterwards, if the revision was older,
-// prefix+"defaults_rev" = new_rev.
-// Split of duties: the caller applies each result (whether a value is accepted is its business). When the caller rejects
-// a value it falls back to the default itself and, if !from_launch, calls p.remove(prefix + key). qx_load_values only
-// changes the in-memory store; the caller save()s. A key whose default_of returns false has an empty default.
+// stored, else default. Afterwards, if the revision was older, prefix+"defaults_rev" = new_rev.
+// The caller applies each value; on success and from_launch it stores prefix+key = value; on failure it applies the
+// default and removes the stored value unless from_launch; then it saves. qx_load_values only changes the in-memory
+// store and never writes a launch value itself. A key whose default_of returns false has an empty default.
 std::vector<PrefLoadResult> qx_load_values(QxPrefs &p, const std::string &prefix, const std::vector<std::string> &keys,
     const std::function<bool(const std::string &, std::string *)> &default_of, int new_rev,
     const std::function<bool(const std::string &, const std::string &, int, bool)> &drop_stored,

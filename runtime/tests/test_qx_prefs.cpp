@@ -70,7 +70,7 @@ static void test_missing_and_corrupt() {
     CHECK(a.load(&err));
     CHECK(!a.has("anything"));
 
-    const char *bad[] = {"{not json", "[1,2]", "{\"a\":1}", "{\"a\":\"b\"} trailing", "{\"a\":\"\\q\"}", "{\"a\":\"x\""};
+    const char *bad[] = {"{not json", "[1,2]", "{\"a\":1}", "{\"a\":\"b\"} trailing", "{\"a\":\"\\q\"}", "{\"a\":\"x\"", "{\"a\":\"b\",}", "{\"a\":{\"b\":\"c\"}}"};
     for (const char *t : bad) {
         write_file(path, t);
         QxPrefs c(path);
@@ -80,6 +80,9 @@ static void test_missing_and_corrupt() {
         CHECK(!err.empty());
         CHECK(!c.has("stale"));
     }
+    write_file(path, "");
+    QxPrefs z(path);
+    CHECK(z.load(&err));
     write_file(path, "  { }  ");
     QxPrefs e(path);
     CHECK(e.load(&err));
@@ -116,6 +119,10 @@ static void test_escapes() {
     QxPrefs a(path);
     CHECK(a.load(&err));
     CHECK(a.get("k") == "AB\t/");
+    write_file(path, "{\"k\":\"caf\\u00e9\"}");
+    QxPrefs b(path);
+    CHECK(b.load(&err));
+    CHECK(b.get("k") == "caf\xc3\xa9");
     unlink(path.c_str());
 }
 
@@ -163,7 +170,8 @@ static void test_launch_value() {
     };
     auto r = qx_load_values(p, "look.", keys(), def_of, 1, drop, launch);
     CHECK(r[1].key == "msaa" && r[1].value == "4" && r[1].from_launch);
-    CHECK(p.get("look.msaa") == "4");
+    CHECK(p.get("look.msaa") != "4");  // not written by the function: the caller stores it after a successful apply
+    CHECK(!p.has("look.msaa"));        // (stored "1" was dropped by drop_stored)
     CHECK(!r[0].from_launch && r[0].value == "full");
     CHECK(!p.has("look.shadows"));
     CHECK(p.get_int("look.defaults_rev", -1) == 1);

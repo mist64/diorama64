@@ -147,15 +147,21 @@ bool QxPrefs::load(std::string *err) {
         if (err) *err = "preferences: read error on " + path_;
         return false;
     }
+    if (text.empty()) return true;
     return parse_flat(text, &map_, err);
 }
 
 bool QxPrefs::save(std::string *err) {
-    std::string text = "{";
+    std::map<std::string, std::string> snap;
     {
         std::lock_guard<std::mutex> g(mu_);
+        snap = map_;
+    }
+    std::lock_guard<std::mutex> sg(save_mu_);  // saves serialise: they share one temp file
+    std::string text = "{";
+    {
         bool first = true;
-        for (const auto &kv : map_) {
+        for (const auto &kv : snap) {
             text += first ? "\n  " : ",\n  ";
             first = false;
             put_escaped(text, kv.first);
@@ -243,7 +249,6 @@ std::vector<PrefLoadResult> qx_load_values(QxPrefs &p, const std::string &prefix
             has_stored = false;
         }
         PrefLoadResult r{key, has_launch ? launch : has_stored ? stored : def, has_launch};
-        if (has_launch) p.set(full, r.value);
         out.push_back(std::move(r));
     }
     if (rev < new_rev) p.set_int(prefix + "defaults_rev", new_rev);
