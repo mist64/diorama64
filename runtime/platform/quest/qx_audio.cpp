@@ -227,7 +227,10 @@ void QxAudio::poll() {
     }
     if (paused_) return;
     if (stream_) {
-        const aaudio_stream_state_t st = AAudioStream_getState(stream_);
+        aaudio_stream_state_t st = AAudioStream_getState(stream_);
+        // A legacy (non-MMAP) stream leaves STOPPING only when its state machine is stepped, which getState does not do:
+        // a zero-timeout wait steps it without blocking.
+        if (st == AAUDIO_STREAM_STATE_STOPPING) AAudioStream_waitForStateChange(stream_, st, &st, 0);
         if (st == AAUDIO_STREAM_STATE_STOPPING) return;   // still winding down: next frame
         if (st != AAUDIO_STREAM_STATE_STOPPED && st != AAUDIO_STREAM_STATE_OPEN) {
             start_pending_ = false;   // starting or playing (a stop that never took)

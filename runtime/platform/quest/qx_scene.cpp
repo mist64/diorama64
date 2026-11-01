@@ -91,14 +91,24 @@ void QxScene::classify(Anchor *a) {
     XrSemanticLabelsSupportInfoFB support{XR_TYPE_SEMANTIC_LABELS_SUPPORT_INFO_FB};
     support.flags = XR_SEMANTIC_LABELS_SUPPORT_MULTIPLE_SEMANTIC_LABELS_BIT_FB;
     if (scene_version_ >= 3) support.flags |= XR_SEMANTIC_LABELS_SUPPORT_ACCEPT_DESK_TO_TABLE_MIGRATION_BIT_FB;
-    support.recognizedLabels = "TABLE,FLOOR";
+    if (scene_version_ >= 4) support.flags |= XR_SEMANTIC_LABELS_SUPPORT_ACCEPT_INVISIBLE_WALL_FACE_BIT_FB;
+    // The labels and flags Meta's samples pass: "TABLE,FLOOR" alone got VALIDATION_FAILURE on a Quest 3S (scene v4).
+    support.recognizedLabels = "TABLE,COUCH,FLOOR,CEILING,WALL_FACE,WINDOW_FRAME,DOOR_FRAME,STORAGE,BED,SCREEN,LAMP,PLANT,"
+                               "WALL_ART,INVISIBLE_WALL_FACE,OTHER";
     if (scene_version_ >= 2) labels.next = &support;
-    if (!ok(get_labels_(session_, a->space, &labels), "xrGetSpaceSemanticLabelsFB")) return;
+    XrResult r = get_labels_(session_, a->space, &labels);
+    if (r == XR_ERROR_VALIDATION_FAILURE && labels.next) {   // retry with the v1 behaviour (DESK stays DESK)
+        ok(r, "xrGetSpaceSemanticLabelsFB(support info)");
+        labels.next = nullptr;
+        r = get_labels_(session_, a->space, &labels);
+    }
+    if (!ok(r, "xrGetSpaceSemanticLabelsFB")) return;
     std::string text(labels.bufferCountOutput, '\0');
     labels.bufferCapacityInput = (uint32_t)text.size();
     labels.buffer = text.empty() ? nullptr : &text[0];
     if (!text.empty() && !ok(get_labels_(session_, a->space, &labels), "xrGetSpaceSemanticLabelsFB")) return;
     text.resize(strnlen(text.c_str(), text.size()));
+    vos_log("AR_QUEST_SCENE labels=%s", text.c_str());
     a->is_floor = qx_has_label(text, "FLOOR");
     a->is_table = qx_has_label(text, "TABLE") || qx_has_label(text, "DESK");
     if (!a->is_table) return;

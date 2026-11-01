@@ -15,6 +15,7 @@
   </queries>
   <application android:hasCode="false" android:label="Diorama64" android:extractNativeLibs="true">
     <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s"/>
+    <profileable android:shell="true"/>   <!-- simpleperf from adb shell on a release build -->
     <activity android:name="android.app.NativeActivity" android:exported="true" android:launchMode="singleTask"
               android:screenOrientation="landscape"
               android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
