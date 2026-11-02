@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sm64ar <sm64ar@localhost>
+Date: Fri, 23 Oct 2026 12:00:00 +0200
+Subject: [PATCH] Android build
+
+Bionic has no pthread_cancel, so stop_thread (which nothing calls) returns
+ENOSYS on Android instead of cancelling. Elsewhere nothing changes.
+---
+ src/pc/thread.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/pc/thread.c b/src/pc/thread.c
+index 8c077c3..b84e9b5 100644
+--- a/src/pc/thread.c
++++ b/src/pc/thread.c
+@@ -1,6 +1,7 @@
+ #include "thread.h"
+ 
+ #include <assert.h>
++#include <errno.h>
+ #include <string.h>
+ 
+ int init_thread_handle(struct ThreadHandle *handle, void *(*entry)(void *), void *arg, void *sp, size_t sp_size) {
+@@ -88,7 +89,12 @@ int stop_thread(struct ThreadHandle *handle) {
+     handle->state = STOPPED;
+ 
+     // Stop and or cancel the execution of the thread in question.
++#ifdef __ANDROID__
++    // Bionic has no pthread_cancel. Nothing calls stop_thread (free_thread_handle has it commented out).
++    return ENOSYS;
++#else
+     return pthread_cancel(handle->thread);
++#endif
+ }
+ 
+ // Optimally just call init_thread_handle instead.
+-- 
+2.54.0
+

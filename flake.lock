@@ -1,0 +1,63 @@
+{
+  "nodes": {
+    "glslang": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1751036750,
+        "narHash": "sha256-sPc+G7/ua7LQ7scuSvqWs7Q7Q+gFvXQ5wGQsEXbWH6w=",
+        "owner": "KhronosGroup",
+        "repo": "glslang",
+        "rev": "8a85691a0740d390761a1008b4696f57facd02c4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "KhronosGroup",
+        "ref": "15.4.0",
+        "repo": "glslang",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1792502884,
+        "narHash": "sha256-IoNisKcGbUjdd45qCqywGMCYmZ5EnkxezvLII0FWwNA=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "02c087f3fe673c9e317f206a627cb6b910336dbe",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "openxr-sdk": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792169712,
+        "narHash": "sha256-ilKprabWXClobxm9QgmakJOu99qURqKAqLxtHLnsf9I=",
+        "owner": "KhronosGroup",
+        "repo": "OpenXR-SDK",
+        "rev": "24a1f2b92d212501a2b1b8d30ffd53abf55fcfa8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "KhronosGroup",
+        "ref": "release-1.1.65",
+        "repo": "OpenXR-SDK",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "glslang": "glslang",
+        "nixpkgs": "nixpkgs",
+        "openxr-sdk": "openxr-sdk"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

@@ -1,5 +1,9 @@
 #include "sm64_pack_stamp.h"
+#ifdef __APPLE__
 #include <CommonCrypto/CommonDigest.h>
+#else
+#include "sha256_portable.h"
+#endif
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>

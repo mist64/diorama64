@@ -11,6 +11,9 @@
 #include <vector>
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>
+#else
+#include <condition_variable>
+#include <mutex>
 #endif
 static_assert(sizeof(fc_vertex) == 32, "fc_vertex is the fixed 32-byte vertex");
 static_assert(sizeof(fc_draw) == 96, "fc_draw layout (FC_ABI_VERSION 5)");
@@ -112,6 +115,51 @@ struct derive_job {
     uint32_t nfaces, count;
     std::atomic<uint32_t> next{0}, faces_done{0};
 };
+#if !defined(__APPLE__)
+// dispatch_apply_f's contract off Apple (the Quest, the desktop build): fn(ctx, i) for every i < n, concurrently, and
+// back once all have returned. The caller runs i = 0; kWorkers - 1 persistent threads (started at the first call, never
+// joined: they sleep between jobs and live as long as the process) take the rest. One job at a time (a mutex), which
+// derive_set's single caller (the game thread) never contends.
+static void parallel_apply(size_t n, void *ctx, void (*fn)(void *, size_t)) {
+    struct Pool {
+        std::mutex job_m, m;
+        std::condition_variable cv, done_cv;
+        uint64_t gen = 0;
+        size_t n = 0, done = 0;
+        void *ctx = nullptr;
+        void (*fn)(void *, size_t) = nullptr;
+        Pool() {
+            for (uint32_t w = 1; w < kWorkers; w++)
+                std::thread([this, w] {
+                    uint64_t seen = 0;
+                    for (;;) {
+                        std::unique_lock<std::mutex> l(m);
+                        cv.wait(l, [&] { return gen != seen; });
+                        seen = gen;
+                        if (w >= n) continue;
+                        void *c = ctx; void (*f)(void *, size_t) = fn;
+                        l.unlock();
+                        f(c, w);
+                        l.lock();
+                        if (++done == n - 1) done_cv.notify_one();
+                    }
+                }).detach();
+        }
+    };
+    static Pool &pool = *new Pool;   // never destroyed: its threads outlive static destruction
+    if (n <= 1) { if (n == 1) fn(ctx, 0); return; }
+    n = std::min<size_t>(n, kWorkers);
+    std::lock_guard<std::mutex> job(pool.job_m);
+    {
+        std::lock_guard<std::mutex> l(pool.m);
+        pool.n = n; pool.done = 0; pool.ctx = ctx; pool.fn = fn; pool.gen++;
+    }
+    pool.cv.notify_all();
+    fn(ctx, 0);
+    std::unique_lock<std::mutex> l(pool.m);
+    pool.done_cv.wait(l, [&] { return pool.done == n - 1; });
+}
+#endif
 static void derive_worker(void *ctx, size_t wi) {
     derive_job &j = *static_cast<derive_job *>(ctx);
     fc_builder *b = j.b;
@@ -210,11 +258,7 @@ static void derive_set(fc_builder *b, fc_derive_scratch &ds, const Sel &selected
         fill.assign(ds.cstart.begin(), ds.cstart.end() - 1);
         for (uint32_t i = 0; i < ns; i++) ds.cseg[fill[root(i)]++] = i;
     }
-#if defined(__APPLE__)
     const bool par = total >= kParallelVerts;
-#else
-    const bool par = false;
-#endif
     ds.items.clear(); ds.fseg.clear();
     for (uint32_t c = 0; c < ns; c++) {
         if (ds.cstart[c + 1] == ds.cstart[c]) continue;
@@ -229,14 +273,16 @@ static void derive_set(fc_builder *b, fc_derive_scratch &ds, const Sel &selected
     derive_job job;
     job.b = b; job.ds = &ds; job.cos_crease = cos_crease; job.cos_half = cos_half;
     job.nfaces = (uint32_t)ds.fseg.size(); job.count = job.nfaces + (uint32_t)ds.items.size();
-#if defined(__APPLE__)
     if (par && ds.items.size() > 1) {
         b->npar++;
+#if defined(__APPLE__)
         dispatch_apply_f(std::min<size_t>(kWorkers, ds.items.size()), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
                          &job, derive_worker);
+#else
+        parallel_apply(std::min<size_t>(kWorkers, ds.items.size()), &job, derive_worker);
+#endif
         return;
     }
-#endif
     derive_worker(&job, 0);
 }
 static void derive_cluster(fc_builder *b, fc_derive_scratch &ds, fc_weld_scratch &w, const uint32_t *segs, size_t nsegs,

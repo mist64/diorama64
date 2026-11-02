@@ -31,6 +31,7 @@ static void c_tick(const ar_player_input *p, uint32_t n) {
     fc_builder_reset(b, sTicks, 320, 240);
     fc_draw d; memset(&d, 0, sizeof d);
     d.space = FC_SPACE_WORLD; d.render_flags = FC_RS_DEPTH_TEST | FC_RS_DEPTH_WRITE;
+    d.light_flags = FC_LF_STATIC | FC_LF_CASTER;   /* static scenery: casts, and the AO bake and underside map see it */
     d.cc.slots = ((uint64_t)FC_SRC_SHADE << 12) | ((uint64_t)FC_SRC_SHADE << 28);
     fc_vertex *v = fc_builder_add_draw(b, &d, 36);
     const int idx[6] = {0, 1, 2, 0, 2, 3};

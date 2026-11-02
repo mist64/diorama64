@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sm64ar <sm64ar@localhost>
+Date: Fri, 23 Oct 2026 10:41:52 +0100
+Subject: [PATCH] atan2 lookup of zero over zero
+
+atan2s(0, 0) reaches atan2_lookup as 0 / 0. Converting the NaN to an integer
+is undefined: on x86 it yields INT_MIN, which clang lets past the range check,
+and the table read faults (the camera standing on its focus in the castle
+grounds). ARM converts NaN to 0, so the headsets never saw it.
+---
+ src/engine/math_util.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/src/engine/math_util.c b/src/engine/math_util.c
+index 04c4ad3..c4e0e34 100644
+--- a/src/engine/math_util.c
++++ b/src/engine/math_util.c
+@@ -20,6 +20,9 @@ inline f32 coss(s16 sm64Angle) {
+  * the resulting angle is in range [0, 0x2000] (1/8 of a circle).
+  */
+ static OPTIMIZE_O3 u16 atan2_lookup(f32 y, f32 x) {
++    // atan2s(0, 0) (two equal points, e.g. the camera on its focus) gets here as 0 / 0: converting that NaN to an
++    // integer is undefined, and x86 yields INT_MIN, which the optimiser lets past the range check below.
++    if (!(x > 0.0f)) { return 0; }
+     s16 idx = (s16)(y / x * 1024.0f + 0.5f);
+     idx = (idx >= 0 && idx < 0x401) ? idx : 0;
+     return gArctanTable[idx];
