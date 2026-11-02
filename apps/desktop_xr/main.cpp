@@ -5,6 +5,8 @@
 //
 //   diorama64_desktop --bundle DIR --docs DIR [--scan-table] [app arguments, e.g. --game sm64 --start story]
 #include <signal.h>
+#include <stdlib.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <atomic>
 #include <cstdio>
@@ -56,6 +58,8 @@ int main(int argc, char **argv) {
     // Monado has no room scan: without a fixed table the level would never appear.
     if (!scan_table && !has_fixed) args.push_back("--fixed-table");
 
+    // SM64AR_PTRACE=1: any process of this user may attach a debugger (gdb -p) despite Yama's ptrace_scope=1.
+    if (getenv("SM64AR_PTRACE")) prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
     struct sigaction sa;
     std::memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_signal;

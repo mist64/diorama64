@@ -16,6 +16,10 @@ The controls are Monado's qwerty driver, typed into its "Monado debug GUI" windo
   right hand      (default) left mouse = trigger, middle mouse = grip, M = A (jump), N = B (punch), V = Y (Start), TFGH = stick
   left hand       hold Ctrl with the same keys: TFGH = stick (Mario moves), M = X, N = menu (the panel)
   either hand     hold Alt for the right hand explicitly; C toggles the hands following the head, R resets them
+Quit with Ctrl-C here (closing Monado's windows does not stop the app).
+
+Debugging: SM64AR_PTRACE=1 lets gdb attach to the running app (gdb -p $(pgrep -x diorama64_deskt)) despite
+ptrace_scope=1; a crash leaves a core dump (coredumpctl list, coredumpctl debug).
 """
 import argparse
 import os
