@@ -52,8 +52,8 @@ direnv allow     # or: nix develop
 ```
 
 `./build.py` asks for your ROM and the packs, builds the app and installs it on the connected Quest (`--no-install` builds
-only). The Vision Pro instructions above are unchanged. The measured Quest performance and first-run Look defaults are
-in [docs/superpowers/plans/2026-10-22-quest-perf.md](docs/superpowers/plans/2026-10-22-quest-perf.md).
+only). The Vision Pro instructions above are unchanged. The Quest starts in the Original N64 look: Room-lit (Look tab)
+is too slow there for now with the Render96 models.
 
 | Control | Action |
 |---|---|

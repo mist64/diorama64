@@ -780,7 +780,7 @@ static void poll_packs() {   // PacksModel.startPolling's refresh
 // First-run Look defaults for this headset, applied only to keys the player has never stored (arvos_quest_seed_look).
 // Entries are {look key, value}. Original N64: on a Quest 3S, Room-lit with the Render96 models runs the game at about
 // 7 Hz in the castle (each tick re-derives smooth normals for every moving vertex); Original N64 holds the display rate.
-// Room-lit stays one switch away in the Look tab. See docs/superpowers/plans/2026-10-22-quest-perf.md.
+// Room-lit stays one switch away in the Look tab.
 static constexpr std::array<std::pair<const char *, const char *>, 1> kQuestLookSeed{{{"mode", "original"}}};
 
 extern "C" int qx_app_startup(void) {
