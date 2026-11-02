@@ -78,17 +78,16 @@ The log: `adb logcat -s Diorama64`.
 
 ### Without a headset (Monado)
 
-The same app runs on the Linux desktop against [Monado](https://monado.freedesktop.org)'s simulated headset, which
-exercises the OpenXR session, the Vulkan renderer on your GPU, the game, input and audio. There is no passthrough or
-room scan there, so the level stands on a fixed table. After one `./build.py` (which stages the ROM and packs):
+The same app runs on the Linux desktop against [Monado](https://monado.freedesktop.org)'s simulated headset, on a fixed
+table and without passthrough. After one `./build.py`:
 
-```sh
+```
 python3 scripts/desktop_xr.py
 ```
 
-Click into the "Monado debug GUI" window to drive it: WASD and right-mouse-drag move and turn the head; for the right
-hand, left mouse is the trigger, M is A (jump), N is B, V is Start and TFGH the stick; hold Ctrl for the left hand
-(Ctrl+TFGH moves Mario, Ctrl+N opens the panel). `scripts/desktop_xr.py --help` lists the rest.
+Click into Monado's debug window ("Monado! ✨⚡🔥") to drive it: WASD and right-mouse-drag move the head; left mouse is
+the trigger, M is A, N is B, V is Start and TFGH the stick; hold Ctrl for the left hand (Ctrl+TFGH moves Mario, Ctrl+N
+opens the panel). Ctrl-C in the terminal quits; `--help` lists the rest.
 
 ## Author
 
