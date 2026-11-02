@@ -349,13 +349,23 @@ NO_HEADSET = """No paired Apple Vision Pro found. With the Mac and the headset o
 Then run ./build.py again."""
 
 
-def resolve(a, saved, asker, teams=find_teams, devices=list_devices):
+LINUX_ONLY_FLAGS = (("team", "--team"), ("bundle_id", "--bundle-id"), ("device", "--device"), ("reinstall", "--reinstall"))
+
+
+def resolve(a, saved, asker, teams=find_teams, devices=list_devices, platform=sys.platform):
     from visionos_device import valid_bundle_id, valid_team
+    linux = platform != "darwin"
+    if linux:
+        if a.target:
+            raise Stop("on Linux ./build.py builds for Meta Quest")
+        for attr, flag in LINUX_ONLY_FLAGS:
+            if getattr(a, attr, None):
+                raise Stop(f"{flag} is for the Apple Vision Pro; on Linux ./build.py builds for Meta Quest")
     known = known_packs()
     c = dict(saved)
     ask = lambda k: a.reconfigure or k not in saved                                    # noqa: E731
-    c["target"] = a.target or saved.get("target", "headset")                           # simulator: --target only
-    if c["target"] not in TARGETS:
+    c["target"] = "quest" if linux else a.target or saved.get("target", "headset")     # simulator: --target only
+    if not linux and c["target"] not in TARGETS:
         raise Stop(f"target {c['target']!r}: simulator or headset")
     if a.packs is not None or a.no_packs or a.pack:
         if a.no_packs:
@@ -372,6 +382,8 @@ def resolve(a, saved, asker, teams=find_teams, devices=list_devices):
                 asker.write(line)
             answer = asker.optional(PACKS_QUESTION).strip() or "all"
         c["packs"] = {pid: OFFICIAL for pid in parse_packs_spec(answer, known)}
+    if linux:
+        return c
     if c["target"] == "headset":
         if a.team:
             c["team"] = a.team
@@ -539,7 +551,20 @@ def write_stamp(pid, sha, packs_dir=None):
 HARNESS = ROOT / "build" / "macos" / "harness" / "bin" / "sm64ar_harness"
 
 
+def pack_tool(run=None):
+    """Linux: the host pack tool that stands in for the macOS harness (generates the .tex files)."""
+    run = run or common.run
+    b = ROOT / "build" / "host"
+    if not (b / "CMakeCache.txt").is_file() and run(["cmake", "-S", ROOT, "-B", b, "-G", "Ninja", "-DSM64AR_SM64=ON"],
+                                                    check=False):
+        raise Stop(f"configuring the host build in {b} failed (see above); the packs need the pack tool")
+    if run(["cmake", "--build", b, "--target", "sm64ar_pack_tool"], check=False):
+        raise Stop(f"building the pack tool in {b} failed (see above); the packs need it")
+
+
 def harness(run=None):
+    if not common.IS_MAC:
+        return pack_tool(run)
     run = run or common.run
     b = ROOT / "build" / "macos"
     if not (b / "CMakeCache.txt").is_file() and run(["cmake", "-S", ROOT, "-B", b, "-G", "Ninja"], check=False):
@@ -576,6 +601,10 @@ def prepare_packs(chosen, write=print):
                                           for k in ("base", "fallback"))).hexdigest()
             if stamp_ok(vid, v["name"], key):
                 write(f"pack {vid} up to date")
+                continue
+            if not common.IS_MAC:
+                write(f"pack {vid} skipped: its costs are measured with the macOS harness")
+                names.remove(v["name"])
                 continue
             harness()
             step("pack_costs.py", write=write, env={"SM64AR_HARNESS": str(HARNESS)})
@@ -625,25 +654,52 @@ def parse_args(argv):
     ap.add_argument("--device", help="headset: its name (xcrun devicectl list devices)")
     ap.add_argument("--no-install", action="store_true", help="headset: build only")
     ap.add_argument("--reinstall", action="store_true", help="headset: install even if it already has this build")
-    ap.add_argument("--no-launch", action="store_true", help="simulator: build only")
+    ap.add_argument("--no-launch", action="store_true", help="simulator, Quest: build/install without starting the app")
     ap.add_argument("--reconfigure", action="store_true", help="ask every question again")
     return ap.parse_args(argv)
+
+
+def quest_main(a, c, w):
+    import quest_device
+    if not a.no_install:
+        r = subprocess.run(["adb", "devices"], capture_output=True, text=True, env=common.env())
+        if quest_device.find_device(r.stdout if r.returncode == 0 else "") is None:
+            raise Stop("connect one Quest with USB debugging allowed")
+    for s in ("sm64_prepare.py", "fetch_lua.py", "sm64_oracle.py"):
+        step(s, write=w)
+    names = prepare_packs(c.get("packs") or {}, w)
+    data = ["--packs", ",".join(names)] if names else ["--no-packs"]
+    flags = ["--no-install"] if a.no_install else [] if a.no_launch else ["--launch"]
+    step("quest_build.py", "--config", "Release", *data, *flags, write=w)
+    w("Built (not installed: --no-install)." if a.no_install else "Diorama64 is on the Quest.")
+    return 0
 
 
 def main(argv, asker=None):
     a = parse_args(argv)
     asker = asker or Asker(sys.stdin.isatty())
     w = asker.write
-    if sys.platform != "darwin" or not apple_silicon():
+    linux = sys.platform != "darwin"
+    if linux:
+        for attr, flag in LINUX_ONLY_FLAGS:
+            if getattr(a, attr, None):
+                raise Stop(f"{flag} is for the Apple Vision Pro; on Linux ./build.py builds for Meta Quest")
+        if a.target:
+            raise Stop("on Linux ./build.py builds for Meta Quest")
+        missing = common.tool_problems()
+        if missing:
+            raise Stop(f"missing tools: {', '.join(missing)}; run inside the nix dev shell: direnv allow, or nix develop")
+    elif not apple_silicon():
         raise Stop("Diorama64 builds on a Mac with Apple silicon")
     if not git_checkout():
         raise Stop(f"{ROOT} is not a git checkout: git clone https://github.com/mist64/diorama64.git")
-    problem, note = common.xcode_problem()
-    if problem:
-        raise Stop(problem)
-    if note:
-        w(note)
-    brew_step(asker)
+    if not linux:
+        problem, note = common.xcode_problem()
+        if problem:
+            raise Stop(problem)
+        if note:
+            w(note)
+        brew_step(asker)
     ensure_submodule("games/sm64/upstream", w)
     saved = load_config()
     want = us_sha1()
@@ -656,6 +712,8 @@ def main(argv, asker=None):
         w(f"ROM -> {ROM.relative_to(ROOT)} (Super Mario 64 US)")
     c = resolve(a, saved, asker)
     save_config(c)
+    if linux:
+        return quest_main(a, c, w)
     if c["target"] == "simulator" and not a.no_launch:
         import sim_util
         try:
